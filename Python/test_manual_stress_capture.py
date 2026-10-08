@@ -97,6 +97,19 @@ class FixedGridCaptureTests(unittest.TestCase):
         finally:
             widget.close()
 
+    def test_evaluation_force_widget_can_hide_connection_text_and_set_subtitle(self):
+        widget = ForceVectorWidget(
+            title="真实平均三维力",
+            show_connection_status=False,
+            subtitle="所选编号验证集三轴均值",
+        )
+        try:
+            self.assertEqual(widget.title, "真实平均三维力")
+            self.assertFalse(widget.show_connection_status)
+            self.assertEqual(widget.subtitle, "所选编号验证集三轴均值")
+        finally:
+            widget.close()
+
     def test_capture_page_embeds_force_vector_beside_model(self):
         with tempfile.TemporaryDirectory() as folder:
             page = FakeTemporaryPage()
@@ -234,6 +247,35 @@ class FixedGridCaptureTests(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_unselected_capture_saves_no_press_and_can_undo(self):
+        with tempfile.TemporaryDirectory() as folder:
+            page = FakeTemporaryPage()
+            window = ManualStressCaptureWindow(page, wavelength_provider=lambda: list(page.reference_wavelengths), output_root=Path(folder))
+            window._read_force_sample = lambda: None
+            try:
+                window._on_temporary_frame(temporary_frame())
+                self.assertTrue(window.capture_current_press())
+                self.assertEqual(window.capture_counts[0], 1)
+                window.select_grid_point(4)
+                window.no_press_button.click()
+                self.assertEqual(window.selected_point, 0)
+                self.assertFalse(any(button.isChecked() for button in window.grid_buttons))
+                self.assertTrue(window.undo_last_annotation(confirm=False))
+                self.assertEqual(window.capture_counts[0], 0)
+                self.assertTrue(window.capture_current_press())
+                session_dir = window.session_dir
+                window.close_session()
+                frames = [json.loads(line) for line in (session_dir / 'frames.jsonl').read_text(encoding='utf-8').splitlines()]
+                quality = frames[0]['quality']
+                self.assertEqual(quality['press_label'], 0)
+                self.assertEqual(quality['press_state'], 'no_press')
+                self.assertIsNone(quality['surface_x_normalized'])
+                self.assertIsNone(quality['grid_row'])
+                self.assertIsNone(quality['paxini_force'])
+                self.assertEqual(len(quality['stable_adc']), 45)
+            finally:
+                window.close()
+
     def test_one_capture_writes_one_45_point_vector_with_number_label(self):
         with tempfile.TemporaryDirectory() as folder:
             page = FakeTemporaryPage()
@@ -309,6 +351,46 @@ class FixedGridCaptureTests(unittest.TestCase):
         self.assertAlmostEqual(force["fz_n"], 2.5, places=6)
         self.assertIsNone(frame["quality"]["force_error"])
 
+    def test_undo_button_removes_latest_annotation_and_updates_counts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            page = FakeTemporaryPage()
+            window = ManualStressCaptureWindow(
+                page,
+                wavelength_provider=lambda: list(page.reference_wavelengths),
+                output_root=Path(folder),
+            )
+            window.attach()
+            window.force_sensor_enabled = False
+            try:
+                window.select_grid_point(17)
+                for listener in page.frame_listeners:
+                    listener(temporary_frame(sequence=16, base=200))
+                self.assertTrue(window.capture_current_press())
+                self.assertTrue(window.undo_button.isEnabled())
+                self.assertEqual(window.capture_counts[17], 1)
+                self.assertTrue(window.undo_last_annotation(confirm=False))
+                self.assertEqual(window.capture_counts[17], 0)
+                self.assertEqual(window.sample_index, 0)
+                self.assertFalse(window.undo_button.isEnabled())
+                session_dir = window.session_dir
+                window.close_session()
+            finally:
+                window.close()
+
+            frames = [
+                json.loads(line)
+                for line in (session_dir / "frames.jsonl").read_text("utf-8").splitlines()
+                if line.strip()
+            ]
+            events = [
+                json.loads(line)
+                for line in (session_dir / "events.jsonl").read_text("utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(frames, [])
+            self.assertEqual(events[-2]["kind"], "press_sample_undo")
+            self.assertEqual(events[-2]["metadata"]["press_label"], 17)
+
     def test_capture_records_force_error_when_sensor_missing(self):
         with tempfile.TemporaryDirectory() as folder:
             page = FakeTemporaryPage()
@@ -345,7 +427,7 @@ class FixedGridCaptureTests(unittest.TestCase):
         self.assertIsNone(frames[0]["quality"]["paxini_force"])
         self.assertIn("无应答", frames[0]["quality"]["force_error"])
 
-    def test_capture_requires_selected_number_and_fresh_45_point_frame(self):
+    def test_capture_requires_fresh_45_point_frame_even_without_position(self):
         with tempfile.TemporaryDirectory() as folder:
             page = FakeTemporaryPage()
             window = ManualStressCaptureWindow(
@@ -356,7 +438,7 @@ class FixedGridCaptureTests(unittest.TestCase):
             window.attach()
             try:
                 self.assertFalse(window.capture_current_press())
-                self.assertIn("编号", window.capture_status_label.text())
+                self.assertIn("临时模式", window.capture_status_label.text())
                 window.select_grid_point(1)
                 # No frame delivered yet -> must refuse with the link hint.
                 self.assertFalse(window.capture_current_press())

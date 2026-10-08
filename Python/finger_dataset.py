@@ -502,6 +502,7 @@ class FingerSessionWriter:
         self._closed = False
         self._error: BaseException | None = None
         self._counts = {"frames": 0, "events": 0, "rejected_queue_full": 0}
+        self._frame_history: list[tuple[int, dict[str, Any]]] = []
         self._state_lock = threading.Lock()
         self._time_lock = threading.Lock()
         self._last_monotonic_ns = -1
@@ -579,6 +580,32 @@ class FingerSessionWriter:
             raise TypeError("frame must be SpectrumFrame")
         self._enqueue("frame", frame.to_record(), frame.monotonic_ns)
 
+    def undo_last_frame(self, *, expected_sample_index: int | None = None) -> dict:
+        """Synchronously remove the newest frame written in this live session."""
+
+        if self._closed:
+            raise RuntimeError("finger session writer is closed")
+        self._check_error()
+        done = threading.Event()
+        request = {
+            "expected_sample_index": expected_sample_index,
+            "done": done,
+            "result": None,
+            "error": None,
+        }
+        try:
+            self._queue.put(
+                ("undo_frame", request), block=True, timeout=self.enqueue_timeout_s
+            )
+        except queue.Full as exc:
+            raise BufferError("finger session queue is full; undo was not applied") from exc
+        if not done.wait(timeout=10.0):
+            raise RuntimeError("timed out waiting for frame undo")
+        if request["error"] is not None:
+            raise request["error"]
+        self._check_error()
+        return dict(request["result"])
+
     append_frame = write_frame
     submit_frame = write_frame
 
@@ -604,17 +631,42 @@ class FingerSessionWriter:
                         kind, record = item
                         if self._error is not None:
                             continue
+                        if kind == "undo_frame":
+                            request = record
+                            try:
+                                if not self._frame_history:
+                                    raise RuntimeError("no captured frame is available to undo")
+                                offset, last_record = self._frame_history[-1]
+                                expected = request["expected_sample_index"]
+                                actual = (last_record.get("quality") or {}).get(
+                                    "sample_index"
+                                )
+                                if expected is not None and actual != expected:
+                                    raise RuntimeError(
+                                        "latest frame does not match the requested annotation"
+                                    )
+                                frames.flush()
+                                frames.seek(offset)
+                                frames.truncate()
+                                frames.flush()
+                                self._frame_history.pop()
+                                with self._state_lock:
+                                    self._counts["frames"] -= 1
+                                request["result"] = last_record
+                            except Exception as exc:  # returned to GUI thread
+                                request["error"] = exc
+                            finally:
+                                request["done"].set()
+                            continue
                         destination = frames if kind == "frame" else events
-                        destination.write(
-                            json.dumps(
-                                _jsonable(record),
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                allow_nan=False,
-                            )
-                            + "\n"
-                        )
+                        offset = destination.tell()
+                        destination.write(json.dumps(
+                            _jsonable(record), ensure_ascii=False,
+                            separators=(",", ":"), allow_nan=False,
+                        ) + "\n")
                         destination.flush()
+                        if kind == "frame":
+                            self._frame_history.append((offset, record))
                         with self._state_lock:
                             self._counts["frames" if kind == "frame" else "events"] += 1
                     except Exception as exc:  # noqa: BLE001 - cross-thread propagation

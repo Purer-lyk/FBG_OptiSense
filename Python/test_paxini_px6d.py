@@ -44,6 +44,69 @@ class FrameHelperTests(unittest.TestCase):
         self.assertIsNone(px.parse_six_axis(nan))
 
 
+class AutoPortTests(unittest.TestCase):
+    def test_rs485_manual_command_bytes(self):
+        self.assertEqual(px.build_rs485_frame(1, b'\x01'), bytes.fromhex('AA557F0101AE'))
+        self.assertEqual(px.build_rs485_frame(5, b'\x01'), bytes.fromhex('AA557F0501FA'))
+        sensor = px.PaxiniForceSensor()
+        frame = px.build_rs485_frame(1, struct.pack('<6f', 1, 2, 3, 4, 5, 6), 0x7f)
+        self.assertTrue(sensor._is_px6d_response(frame))
+
+    def test_rs485_pump_reads_six_axis_reply(self):
+        sensor = px.PaxiniForceSensor()
+        sensor.protocol = 'rs485'
+        packet = px.build_rs485_frame(1, struct.pack('<6f', 1, -2, -3, 0.1, 0.2, 0.3))
+        class Connection:
+            def __init__(self): self.sent = []
+            def write(self, data): self.sent.append(data)
+            def flush(self): pass
+            @property
+            def in_waiting(self): return len(packet)
+            def read(self, count):
+                sensor._running = False
+                return packet
+        sensor._ser = Connection()
+        sensor._running = True
+        sensor._pump_rs485()
+        self.assertEqual(sensor.frames_received, 1)
+        self.assertEqual(sensor._latest[:3], (1, -2, -3))
+        self.assertEqual(sensor._ser.sent, [bytes.fromhex('AA557F0501FA')])
+
+    def test_auto_port_selects_protocol_response_not_first_port(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        opened = []
+        class FakeSerial:
+            def __init__(self, port, *args, **kwargs):
+                self.port = port
+                self.closed = False
+                self.data = bytearray()
+                opened.append(self)
+            def write(self, packet):
+                if self.port == 'COM12':
+                    self.data.extend(px.build_frame(0x01, b'\0' * 8))
+            def flush(self): pass
+            @property
+            def in_waiting(self): return len(self.data)
+            def read(self, count):
+                data = bytes(self.data[:count]); del self.data[:count]; return data
+            def close(self): self.closed = True
+        sensor = px.PaxiniForceSensor()
+        with patch('serial.tools.list_ports.comports', return_value=[SimpleNamespace(device='COM4'), SimpleNamespace(device='COM12')]), patch('serial.Serial', FakeSerial):
+            connection = sensor._discover_port(probe_timeout=0.03)
+        self.assertEqual(sensor.port, 'COM12')
+        self.assertIs(connection, opened[1])
+        self.assertTrue(opened[0].closed)
+        connection.close()
+
+    def test_auto_port_rejects_bad_checksum(self):
+        sensor = px.PaxiniForceSensor()
+        bad = bytearray(px.build_frame(0x03, struct.pack('<6f', 1, 2, 3, 4, 5, 6)))
+        bad[-1] ^= 1
+        self.assertFalse(sensor._is_px6d_response(bad))
+        self.assertTrue(sensor._is_px6d_response(px.build_frame(0x01, b'\0'*8)))
+
+
 class PumpTests(unittest.TestCase):
     def test_extract_parses_push_frame(self):
         sensor = px.PaxiniForceSensor("COMX")

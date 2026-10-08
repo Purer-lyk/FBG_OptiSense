@@ -84,7 +84,11 @@ from mechanical_finger_3d import (
     MAX_PRESS_DEPTH_MM,
 )
 from legacy_finger_stub import LegacyFingerControllerStub as MechanicalFinger3DWindow
-from manual_stress_capture import ManualStressCaptureWindow
+from manual_stress_capture import (
+    LATEST_FRAME_MAX_AGE_MS,
+    ManualStressCaptureWindow,
+)
+from manual_touch_training_page import ManualTouchTrainingPage
 from mode_table_manager import activate_pending_runtime_tables
 from ota_machine_profiles import (
     MACHINE_LABELS,
@@ -286,6 +290,11 @@ PAGE_INFO = (
         "局域网 OTA 升级",
         "安全校验固件包并在同一局域网内更新板卡程序",
         "ota",
+    ),
+    (
+        "模型训练与评估",
+        "载入最新注意力/CNN模型，查看空载/25点位置识别与三维力预测",
+        "model",
     ),
 )
 
@@ -882,6 +891,11 @@ class UnifiedFbgStudio(QtWidgets.QMainWindow):
         self.ota_page = OtaUpdatePage(settings_store=self.ota_settings_store)
         self.ota_page.before_update = self._prepare_ota
         self.ota_page.after_update = self._after_ota_update
+        self.training_page = ManualTouchTrainingPage(
+            default_dataset_dir=output_path("manual_touch_sequences"),
+            frame_source=self.local_controller.page_temporary_test,
+            force_provider=self._latest_live_force,
+        )
         self._generated_mode_table_package_path = None
         self.local_controller.page_equal_interval.ota_package_ready = (
             self._open_generated_ota_package
@@ -2617,6 +2631,16 @@ class UnifiedFbgStudio(QtWidgets.QMainWindow):
         ota_scroll.setWidget(ota_viewport)
         ota_shell_layout.addWidget(ota_scroll)
         self.workspace_tabs.addTab(ota_shell, PAGE_INFO[3][0])
+
+        training_scroll = QtWidgets.QScrollArea()
+        training_scroll.setObjectName("trainingScroll")
+        training_scroll.setWidgetResizable(True)
+        training_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        training_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        training_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        training_scroll.setWidget(self.training_page)
+        self.training_scroll = training_scroll
+        self.workspace_tabs.addTab(training_scroll, PAGE_INFO[4][0])
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         main_layout.addWidget(self.workspace_tabs, 1)
         root.addWidget(main, 1)
@@ -2812,6 +2836,25 @@ class UnifiedFbgStudio(QtWidgets.QMainWindow):
             f"已在屏幕 {index}（{screen.name() or '未命名显示器'}）最大化；"
             "Windows标题栏和右上角窗口按钮保留"
         )
+
+    def _latest_live_force(self):
+        """Newest valid PX6D Fx/Fy/Fz, or None — never fake a zero."""
+
+        controller = getattr(self, "manual_capture_controller", None)
+        sensor = getattr(controller, "force_sensor", None)
+        if (
+            controller is None
+            or not getattr(controller, "force_sensor_enabled", False)
+            or sensor is None
+            or sensor._latest is None
+            or sensor._latest_ns is None
+        ):
+            return None
+        if (
+            time.monotonic_ns() - sensor._latest_ns
+        ) / 1e6 > LATEST_FRAME_MAX_AGE_MS:
+            return None
+        return tuple(float(value) for value in sensor._latest[:3])
 
     def _workspace_changed(self, index: int):
         index = max(0, min(int(index), len(PAGE_INFO) - 1))
@@ -3331,6 +3374,8 @@ class UnifiedFbgStudio(QtWidgets.QMainWindow):
             if hasattr(self, "manual_capture_controller"):
                 self.manual_capture_controller.close_session()
                 self.manual_capture_controller.close()
+            if hasattr(self, "training_page"):
+                self.training_page.shutdown()
             self.finger_controller.close()
             self.mach3_emergency.close()
         finally:
@@ -3365,7 +3410,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--view",
-        choices=("spectrum", "finger", "settings", "ota"),
+        choices=("spectrum", "finger", "settings", "ota", "training"),
         default="spectrum",
         help="启动时显示的主页",
     )
@@ -3391,7 +3436,10 @@ def main(argv=None):
     polish_plots(window)
     window.show()
 
-    view_indexes = {"spectrum": 0, "finger": 1, "settings": 2, "ota": 3}
+    view_indexes = {
+        "spectrum": 0, "finger": 1, "settings": 2, "ota": 3,
+        "training": 4,
+    }
     window.workspace_tabs.setCurrentIndex(view_indexes[args.view])
     if args.demo:
         QtCore.QTimer.singleShot(

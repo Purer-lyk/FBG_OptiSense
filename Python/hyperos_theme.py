@@ -589,6 +589,20 @@ def make_nav_icon(kind: str, color: str, size: int = 22) -> QtGui.QIcon:
         painter.drawLine(QtCore.QPointF(w * 0.5, w * 0.10), QtCore.QPointF(w * 0.5, w * 0.64))
         painter.drawLine(QtCore.QPointF(w * 0.30, w * 0.31), QtCore.QPointF(w * 0.5, w * 0.10))
         painter.drawLine(QtCore.QPointF(w * 0.70, w * 0.31), QtCore.QPointF(w * 0.5, w * 0.10))
+    elif kind == "model":
+        painter.drawRoundedRect(QtCore.QRectF(w * 0.12, w * 0.15, w * 0.76, w * 0.70), 4, 4)
+        painter.setBrush(QtGui.QColor(color))
+        for x, y in ((0.28, 0.34), (0.50, 0.27), (0.72, 0.34),
+                     (0.34, 0.64), (0.66, 0.64)):
+            painter.drawEllipse(QtCore.QPointF(w * x, w * y), 1.45, 1.45)
+        painter.setBrush(QtCore.Qt.NoBrush)
+        for a, b in (((0.28, 0.34), (0.50, 0.27)),
+                     ((0.50, 0.27), (0.72, 0.34)),
+                     ((0.28, 0.34), (0.34, 0.64)),
+                     ((0.72, 0.34), (0.66, 0.64)),
+                     ((0.34, 0.64), (0.66, 0.64))):
+            painter.drawLine(QtCore.QPointF(w * a[0], w * a[1]),
+                             QtCore.QPointF(w * b[0], w * b[1]))
     elif kind == "device":
         painter.drawRoundedRect(QtCore.QRectF(w * 0.12, w * 0.17, w * 0.76, w * 0.66), 5, 5)
         painter.drawLine(QtCore.QPointF(w * 0.30, w * 0.37), QtCore.QPointF(w * 0.70, w * 0.37))

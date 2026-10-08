@@ -347,8 +347,18 @@ class ForceVectorWidget(QtWidgets.QWidget):
     }
     AUTO_SCALE_N = 40.0
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        title="实时力",
+        show_connection_status=True,
+        subtitle="空载并保持静止后执行归零",
+    ):
         super().__init__(parent)
+        self.title = str(title)
+        self.show_connection_status = bool(show_connection_status)
+        self.subtitle = str(subtitle)
         self.connected = False
         self.force_xyz = (0.0, 0.0, 0.0)
         self.moments = (0.0, 0.0, 0.0)
@@ -429,20 +439,23 @@ class ForceVectorWidget(QtWidgets.QWidget):
         title_font.setBold(True)
         painter.setFont(title_font)
         painter.setPen(QtGui.QColor(35, 43, 58))
-        painter.drawText(QtCore.QPointF(18, 27), "实时力")
-        status = "已连接" if self.connected else "未连接"
-        painter.setPen(
-            QtGui.QColor(38, 166, 104)
-            if self.connected
-            else QtGui.QColor(143, 151, 164)
-        )
-        painter.drawText(QtCore.QPointF(77, 27), status)
+        painter.drawText(QtCore.QPointF(18, 27), self.title)
+        if self.show_connection_status:
+            status = "已连接" if self.connected else "未连接"
+            painter.setPen(
+                QtGui.QColor(38, 166, 104)
+                if self.connected
+                else QtGui.QColor(143, 151, 164)
+            )
+            title_width = QtGui.QFontMetrics(title_font).horizontalAdvance(self.title)
+            status_x = min(width - 62.0, 18.0 + title_width + 12.0)
+            painter.drawText(QtCore.QPointF(status_x, 27), status)
         hint_font = painter.font()
         hint_font.setPointSizeF(8)
         hint_font.setBold(False)
         painter.setFont(hint_font)
         painter.setPen(QtGui.QColor(126, 135, 149))
-        painter.drawText(QtCore.QPointF(18, 49), "空载并保持静止后执行归零")
+        painter.drawText(QtCore.QPointF(18, 49), self.subtitle)
 
         # Top section: a clean pseudo-3D triad. Arrow length and direction
         # respond to the signed live force while retaining a readable stub.
@@ -559,7 +572,8 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
         self.selected_point: int | None = None
         self.sample_index = 0
         self.sequence = 0
-        self.capture_counts = {index: 0 for index in range(1, 26)}
+        self.capture_counts = {index: 0 for index in range(0, 26)}
+        self.capture_history = []
         self.latest_frame = None
         self.latest_values = None
         self.latest_peak_fits = None
@@ -569,7 +583,7 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
         # Paxini PX6D six-axis force sensor (RS485 over USB CDC, auto-push).
         # Reading is best-effort: when absent/busy, samples simply record a
         # null force plus the reason.
-        self.force_sensor = PaxiniForceSensor("COM9")
+        self.force_sensor = PaxiniForceSensor()
         self.force_sensor_enabled = True
         self.force_last_error: str | None = None
         self.force_notice = None
@@ -660,6 +674,14 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
         self.capture_button.setProperty("role", "primary")
         self.capture_button.clicked.connect(self.capture_current_press)
         controls.addWidget(self.capture_button)
+        self.no_press_button = QtWidgets.QPushButton("无按压／空载（标签0）")
+        self.no_press_button.clicked.connect(self.select_no_press)
+        controls.addWidget(self.no_press_button)
+        self.undo_button = QtWidgets.QPushButton("回退上一次标注")
+        self.undo_button.setEnabled(False)
+        self.undo_button.setToolTip("删除本数据集中刚刚采集的最后一条标注数据")
+        self.undo_button.clicked.connect(self.undo_last_annotation)
+        controls.addWidget(self.undo_button)
         self.close_session_button = QtWidgets.QPushButton("保存并关闭数据集")
         self.close_session_button.clicked.connect(self.close_session)
         controls.addWidget(self.close_session_button)
@@ -702,13 +724,13 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
         surface_outer.addWidget(bottom_direction)
         outer.addWidget(surface_card, 1)
 
-        self.selected_label = QtWidgets.QLabel("当前未选择编号")
+        self.selected_label = QtWidgets.QLabel("当前标签：无按压／空载（0号）")
         self.selected_label.setObjectName("statusPill")
         self.selected_label.setProperty("statusKind", "warning")
         outer.addWidget(self.selected_label)
 
         self.capture_status_label = QtWidgets.QLabel(
-            "等待完整45点临时模式扫描；请选择1～25中的一个位置编号"
+            "等待完整45点临时模式扫描；不选位置可采空载，按压时请选择1～25号"
         )
         self.capture_status_label.setWordWrap(True)
         self.capture_status_label.setObjectName("softHint")
@@ -867,7 +889,7 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
             self.force_vector.set_force(None, None, None, connected=False)
             reason = sensor.last_error or self.force_last_error
             text = (
-                "帕西尼力传感器（COM9）：未收到数据"
+                f"帕西尼力传感器（{sensor.port or '自动搜索'}）：未收到数据"
                 + (f"（{reason}）" if reason else "")
                 + "；请确认传感器已上电、串口未被官方上位机占用"
             )
@@ -882,13 +904,13 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
             )
             if age_ms > LATEST_FRAME_MAX_AGE_MS:
                 text = (
-                    f"帕西尼力传感器（COM9）：数据中断（最新帧 {age_ms:.0f} ms 前，"
+                    f"帕西尼力传感器（{sensor.port or '自动搜索'}）：数据中断（最新帧 {age_ms:.0f} ms 前，"
                     f"累计{sensor.frames_received}帧）{zero_text}"
                 )
                 kind = "warning"
             else:
                 text = (
-                    f"帕西尼力传感器（COM9）：已连接 · Fx={fx:+.3f} N  "
+                    f"帕西尼力传感器（{sensor.port or '自动搜索'}）：已连接 · Fx={fx:+.3f} N  "
                     f"Fy={fy:+.3f} N  Fz={fz:+.3f} N"
                     f"（累计{sensor.frames_received}帧）{zero_text}"
                 )
@@ -902,6 +924,16 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
     def _safe_name(value):
         clean = re.sub(r'[^0-9A-Za-z_\-\u4e00-\u9fff]+', '_', str(value).strip())
         return clean.strip('_') or "press_grid"
+
+    def select_no_press(self, _checked=False):
+        self.selected_point = 0
+        self.grid_group.setExclusive(False)
+        for button in self.grid_group.buttons():
+            button.setChecked(False)
+        self.grid_group.setExclusive(True)
+        self.selected_label.setText(f"当前标签：无按压／空载（0号） · 已采{self.capture_counts[0]}条")
+        self.capture_status_label.setText("请保持手指无按压，然后点击“采集当前45点”")
+        return True
 
     def select_grid_point(self, label):
         label = int(label)
@@ -949,13 +981,15 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
                 "makima_curves_adc_voltage_dbm",
             ],
             "grid_shape": [GRID_ROWS, GRID_COLUMNS],
-            "label_range": [1, GRID_POINT_COUNT],
+            "label_range": [0, GRID_POINT_COUNT],
+            "no_press_label": 0,
+            "label_semantics": "0=no_press; 1..25=pressed_position",
             "view": "finger_surface_front_25_points",
             "point_layout": [
                 {"label": label, "x": x, "y": y}
                 for label, x, y in FINGER_POINT_LAYOUT
             ],
-            "intended_task": "classify press_label_1_to_25_from_45_point_vector",
+            "intended_task": "capture_no_press_0_and_press_labels_1_to_25",
         }
         self.writer = FingerSessionWriter(
             session_dir, queue_capacity=512, manifest_extra=metadata
@@ -979,9 +1013,6 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
         return values
 
     def capture_current_press(self):
-        if self.selected_point is None:
-            self.capture_status_label.setText("请先选择1～25中的位置编号")
-            return False
         force = None
         force_error = None
         wavelengths = list(self.wavelength_provider() or ())
@@ -1003,13 +1034,13 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
             return False
 
         self._ensure_session()
-        label = int(self.selected_point)
-        surface_x, surface_y = FINGER_POINT_BY_LABEL[label]
-        region = _surface_region(surface_y)
+        label = int(self.selected_point or 0)
+        surface_x, surface_y = FINGER_POINT_BY_LABEL[label] if label else (None, None)
+        region = _surface_region(surface_y) if label else "无按压／空载"
         # Retain the historical row/column fields for old readers, but the
         # authoritative annotation is now the hand-surface coordinate below.
-        row = (label - 1) // GRID_COLUMNS + 1
-        column = (label - 1) % GRID_COLUMNS + 1
+        row = (label - 1) // GRID_COLUMNS + 1 if label else None
+        column = (label - 1) % GRID_COLUMNS + 1 if label else None
         self.sample_index += 1
         self.sequence += 1
         capture_ns = time.monotonic_ns()
@@ -1025,10 +1056,12 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
         quality = {
             "dataset_kind": "fixed_25_point_press_grid",
             "press_label": label,
+            "press_state": "pressed" if label else "no_press",
+            "is_pressed": bool(label),
             "grid_row": row,
             "grid_column": column,
-            "surface_x_normalized": float(surface_x),
-            "surface_y_normalized": float(surface_y),
+            "surface_x_normalized": float(surface_x) if surface_x is not None else None,
+            "surface_y_normalized": float(surface_y) if surface_y is not None else None,
             "surface_region": region,
             "sample_index": self.sample_index,
             "source_frame_sequence": int(frame.get("sequence", -1)),
@@ -1065,10 +1098,12 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
             monotonic_ns=capture_ns,
             metadata={
                 "press_label": label,
+                "press_state": "pressed" if label else "no_press",
+                "is_pressed": bool(label),
                 "grid_row": row,
                 "grid_column": column,
-                "surface_x_normalized": float(surface_x),
-                "surface_y_normalized": float(surface_y),
+                "surface_x_normalized": float(surface_x) if surface_x is not None else None,
+                "surface_y_normalized": float(surface_y) if surface_y is not None else None,
                 "surface_region": region,
                 "sample_index": self.sample_index,
                 "source_frame_sequence": int(frame.get("sequence", -1)),
@@ -1085,13 +1120,20 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
             source="temporary_test_live_frame",
             transimpedance_ohm={1: units.transimpedance_ohm(selector)},
         ))
+        self.capture_history.append({
+            "press_label": label,
+            "sample_index": self.sample_index,
+            "sequence": self.sequence,
+        })
+        self.undo_button.setEnabled(True)
         self.capture_counts[label] += 1
         count = self.capture_counts[label]
         total = sum(self.capture_counts.values())
         button = self.grid_group.button(label)
-        button.setToolTip(
-            f"手指表面位置编号 {label} · {region} · 已采{count}条"
-        )
+        if button is not None:
+            button.setToolTip(
+                f"手指表面位置编号 {label} · {region} · 已采{count}条"
+            )
         self.selected_label.setText(
             f"当前标签：编号 {label} · {region} · 已采{count}条"
         )
@@ -1106,6 +1148,71 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
                 if force is not None
                 else " · 力传感器未读到"
             )
+        )
+        return True
+
+    def undo_last_annotation(self, _checked=False, *, confirm=True):
+        """Remove the most recently captured frame and restore the UI counters."""
+
+        if self.writer is None or not self.capture_history:
+            self.capture_status_label.setText("当前数据集中没有可回退的标注")
+            self.undo_button.setEnabled(False)
+            return False
+        latest = self.capture_history[-1]
+        label = int(latest["press_label"])
+        sample_index = int(latest["sample_index"])
+        if confirm:
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "回退上一次标注",
+                f"将删除刚刚采集的编号{label}第{sample_index}条数据，是否继续？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if answer != QtWidgets.QMessageBox.Yes:
+                return False
+        try:
+            self.writer.undo_last_frame(expected_sample_index=sample_index)
+            self.writer.write_event(ContactEvent(
+                kind="press_sample_undo",
+                metadata={
+                    "press_label": label,
+                    "sample_index": sample_index,
+                    "reason": "operator_undo_last_annotation",
+                },
+            ))
+        except Exception as exc:
+            self.capture_status_label.setText(f"回退失败，数据未修改：{exc}")
+            return False
+
+        self.capture_history.pop()
+        self.capture_counts[label] = max(0, self.capture_counts[label] - 1)
+        if self.capture_history:
+            self.sample_index = int(self.capture_history[-1]["sample_index"])
+            self.sequence = int(self.capture_history[-1]["sequence"])
+        else:
+            self.sample_index = 0
+            self.sequence = 0
+        self.undo_button.setEnabled(bool(self.capture_history))
+        total = sum(self.capture_counts.values())
+        count = self.capture_counts[label]
+        _x, y = FINGER_POINT_BY_LABEL[label] if label else (None, None)
+        region = _surface_region(y) if label else "无按压／空载"
+        button = self.grid_group.button(label)
+        if button is not None:
+            button.setToolTip(
+                f"手指表面位置编号 {label} · {region} · 已采{count}条"
+            )
+        if int(self.selected_point or 0) == label:
+            self.selected_label.setText(
+                f"当前标签：编号 {label} · {region} · 已采{count}条"
+            )
+        self.counts_label.setText(
+            f"已采集：{total}条 · 编号{label}累计{count}条 · "
+            f"丢弃非45点帧{self.rejected_non45_frames}"
+        )
+        self.capture_status_label.setText(
+            f"已回退：删除编号{label}的第{sample_index}条标注数据"
         )
         return True
 
@@ -1124,6 +1231,8 @@ class ManualStressCaptureWindow(QtWidgets.QMainWindow):
         path = self.session_dir
         self.writer.close()
         self.writer = None
+        self.capture_history.clear()
+        self.undo_button.setEnabled(False)
         self.dataset_name_edit.setEnabled(True)
         self.capture_status_label.setText(
             f"数据集已保存：{path} · 共{total}条45点数据"

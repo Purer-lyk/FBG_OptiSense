@@ -109,6 +109,8 @@ def _validate_group_count(groups):
 
 
 AUTO_SELECTION_FRACTIONS = (-0.10, 0.11, 0.48, 0.86, 1.06)
+AUTO_SELECTION_PROMINENCE_DB = 5.0
+AUTO_SELECTION_ENVELOPE_WIDTH_NM = 1.0
 """Target five-point positions as fractions of the half-height envelope.
 
 Reverse-engineered from operator manual selections on unit 3: the outer two
@@ -154,7 +156,7 @@ def auto_select_dense_plan(table, wavelengths, values, *, feedback_selector=2,
         ), dtype=float),
         sigma=smooth_sigma, mode='nearest',
     )
-    detection_prominence = max(float(np.ptp(detection_curve)) * .08, 1e-9)
+    detection_prominence = AUTO_SELECTION_PROMINENCE_DB
     detected_peaks, properties = find_peaks(
         detection_curve,
         prominence=detection_prominence,
@@ -170,24 +172,9 @@ def auto_select_dense_plan(table, wavelengths, values, *, feedback_selector=2,
         np.asarray(properties['prominences'], dtype=float)
         * np.sqrt(detection_width_nm)
     )
-    # Second-highest score reference: one clipped (saturated) giant must not
-    # raise the keep threshold and starve the weakest real gratings.
-    if len(detection_scores) >= 2:
-        detection_score_reference = float(np.sort(detection_scores)[-2])
-    else:
-        detection_score_reference = float(np.max(detection_scores))
-    dominant = np.flatnonzero(
-        detection_scores >= detection_score_reference * SELECTION_DBM_SCORE_FRACTION
-    )
-    if not len(dominant):
-        dominant = np.asarray([int(np.argmax(detection_scores))], dtype=int)
-    rank = dominant[np.argsort(detection_scores[dominant])[::-1]]
-    if len(rank) > MAX_PEAKS:
-        if (detection_scores[rank[MAX_PEAKS]]
-                >= SELECTION_DBM_AMBIGUITY_RATIO
-                * detection_scores[rank[MAX_PEAKS - 1]]):
-            raise ValueError('主峰与次峰无法可靠区分，无法自动选点')
-        rank = rank[:MAX_PEAKS]
+    # The hardware has nine gratings. A tenth comparable 5 dB candidate is
+    # normally switching ripple, not a reason to disable automatic selection.
+    rank = np.argsort(detection_scores)[::-1][:MAX_PEAKS]
     selected_peaks = np.sort(detected_peaks[rank])
 
     groups = []
@@ -203,26 +190,9 @@ def auto_select_dense_plan(table, wavelengths, values, *, feedback_selector=2,
             center_curve[left:right] >= 0.995 * local_maximum
         )
         apex = int(left + int(np.mean(tie_set)))
-        # Half-height crossings by walking the smoothed linear envelope.
-        walk_left = max(0, apex - 40)
-        walk_right = min(len(center_curve), apex + 41)
-        base = float(np.min(center_curve[walk_left:walk_right]))
-        half_level = base + (center_curve[apex] - base) / 2.0
-        crossing_left = apex
-        while crossing_left > walk_left and center_curve[crossing_left] > half_level:
-            crossing_left -= 1
-        crossing_right = apex
-        while (crossing_right < walk_right - 1
-               and center_curve[crossing_right] > half_level):
-            crossing_right += 1
-        left_nm = float(x[crossing_left])
-        right_nm = float(x[crossing_right])
-        if right_nm - left_nm < 3.0 * step:
-            raise ValueError('自动选点遇到无法测量的峰形（半高宽过窄）')
-        indices = []
-        for fraction in AUTO_SELECTION_FRACTIONS:
-            target_nm = left_nm + fraction * (right_nm - left_nm)
-            indices.append(int(np.argmin(np.abs(x - target_nm))))
+        apex_nm = float(x[apex])
+        indices = [int(np.argmin(np.abs(x - (apex_nm + offset))))
+                   for offset in np.linspace(-.5, .5, 5)]
         for position in range(1, 5):
             if indices[position] <= indices[position - 1]:
                 indices[position] = indices[position - 1] + 1
@@ -235,7 +205,10 @@ def auto_select_dense_plan(table, wavelengths, values, *, feedback_selector=2,
         source=source,
     )
     plan['manual_selection_method'] = 'auto_envelope_5point_cover'
-    plan['auto_selection_fractions'] = list(AUTO_SELECTION_FRACTIONS)
+    plan['automatic_selection'] = True
+    plan['selection_prominence_db'] = AUTO_SELECTION_PROMINENCE_DB
+    plan['selection_envelope_width_nm'] = AUTO_SELECTION_ENVELOPE_WIDTH_NM
+    plan['selection_rule'] = 'five_points_covering_1nm_envelope_for_peaks_over_5db'
     return plan
 
 

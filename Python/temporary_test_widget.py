@@ -525,7 +525,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.machine_profile_label.setWordWrap(True)
         layout.addWidget(self.machine_profile_label)
         self.note_label = QtWidgets.QLabel("已有45点表可直接扫描或采集参考线；只有重新选点才需重采密集光谱。实线为实时值，虚线为慢速参考。\n"
-                               "自动选点时五点覆盖约两倍半高宽，尽量包含峰的两侧；只显示实测点，各峰之间不补线。等待自行调节，允许低于15 Hz。\n"
+                               "自动选点保留最强的9个、峰突出度至少5 dB的峰；每峰5点等间隔覆盖以峰顶为中心的1 nm包络。\n"
                                "临时表仅在RAM中，使用USB；默认连续循环，点击停止才结束；异常保护仍会停光。\n"
                                "当前实物幅值对照未通过。扫描中45点不跟随峰移动，不归一化、不平滑、不剔除幅值变化。\n"
                                "两个ADC读数接近不代表波长已稳定；等待时间需实测验证。修改模拟放大后需重新做幅值对照。")
@@ -599,8 +599,8 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         )
         self.spacing = QtWidgets.QDoubleSpinBox()
         self.spacing.setRange(0, 0)
-        self.spacing.setSpecialValueText("半高宽内等间隔5点")
-        self.spacing.setToolTip('自动点全部位于峰的半高宽内；人工用左右方向键调整后可以不等间隔。')
+        self.spacing.setSpecialValueText("1 nm包络内等间隔5点")
+        self.spacing.setToolTip('自动点以峰顶为中心，在1 nm宽度内等间隔放置5个实测点。')
         self.spacing.setEnabled(False)
         self.spacing.hide()
         self.cycles = QtWidgets.QSpinBox()
@@ -741,8 +741,8 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.manual_clear_button = QtWidgets.QPushButton('清空手动点')
         self.auto_select_button = QtWidgets.QPushButton('自动选点（覆盖峰包络）')
         self.auto_select_button.setToolTip(
-            '在当前密集光谱上自动识别各峰，把每峰5点铺在峰的上升沿、峰顶与下降沿，\n'
-            '首末两点略超出半高宽以覆盖整个包络。生成后仍可撤销单点再手动微调。'
+            '识别突出度至少5 dB的峰，保留最强9峰；每峰以峰顶为中心，\n'
+            '在1 nm宽度内等间隔放置5个实测点。生成后仍可手动微调。'
         )
         self.auto_select_button.setEnabled(False)
         self.auto_select_button.clicked.connect(self.auto_select_points)
@@ -2552,7 +2552,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.render_plan(ready=False)
         peak_count = self.peak_count()
         self.status.setText(
-            f'自动选点完成：识别{peak_count}峰，每峰5点覆盖上升沿-峰顶-下降沿；'
+            f'自动选点完成：识别{peak_count}峰，每峰5点覆盖峰顶中心1 nm包络；'
             '请点击“采集并绘制参考线（当前'
             f'{self.point_count()}点）”验证稀疏路径，或切换手动选点重新放置。'
         )
