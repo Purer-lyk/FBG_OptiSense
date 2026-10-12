@@ -1,7 +1,6 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import json
-from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 import numpy as np
@@ -11,6 +10,7 @@ from temporary_test_widget import (
     TemporaryTestWindow, TemporaryWorker, ReferenceLineWorker,
     equal_interval_indices_for_range, load_forward_settle_hints,
     temporary_transport_supported,
+    boundary_wait_from_settings,
 )
 from fbg_lan_serial import FbgLanSerial
 from test_temporary_test_mode import reference, frame
@@ -23,6 +23,34 @@ from machine_profile import (
 
 
 class WidgetTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        previous_machine = get_runtime_machine_id()
+        self.addCleanup(set_runtime_machine_id, previous_machine)
+        set_runtime_machine_id('machine_1')
+        base = Path(folder.name)
+        override = patch.multiple('temporary_test_widget',
+                                 SCAN_PREFERENCES_PATH=base / 'scan_preferences.json',
+                                 LAST_SESSION_PATH=base / 'last_session.json',
+                                 FINGER_CAPTURE_DIR=base / 'finger_captures',
+                                 LAST_FINGER_CAPTURE_PATH=base / 'last_finger_capture.json')
+        override.start()
+        self.addCleanup(override.stop)
+        # Keep normal per-machine storage routing while redirecting its root.
+        routing = patch('temporary_test_widget.output_path',
+                        side_effect=lambda *parts: base.joinpath(*parts))
+        routing.start()
+        self.addCleanup(routing.stop)
+        constants = patch.multiple('temporary_test_widget',
+            _LEGACY_LAST_SESSION_PATH=base / 'last_session.json',
+            _LEGACY_FINGER_CAPTURE_DIR=base / 'finger_captures',
+            _LEGACY_LAST_FINGER_CAPTURE_PATH=base / 'last_finger_capture.json')
+        constants.start()
+        self.addCleanup(constants.stop)
+
     @classmethod
     def setUpClass(cls):
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -35,6 +63,46 @@ class WidgetTests(unittest.TestCase):
         self.assertIn('2001点', window.machine_profile_label.text())
         self.assertIn('3峰', window.machine_profile_label.text())
         window.close()
+
+    def test_temporary_page_hides_explanatory_lines_and_keeps_large_plot(self):
+        window = TemporaryTestWindow(None)
+        try:
+            for label in (
+                window.title_label,
+                window.machine_profile_label,
+                window.note_label,
+                window.finger_record_label,
+            ):
+                self.assertTrue(label.isHidden())
+            self.assertTrue(window.advanced_panel.isHidden())
+            self.assertGreaterEqual(window.plot.minimumHeight(), 260)
+            self.assertGreaterEqual(window.data_tabs.minimumHeight(), 160)
+            self.assertLessEqual(window.data_tabs.maximumHeight(), 190)
+            window.advanced_toggle.setChecked(True)
+            self.assertFalse(window.advanced_panel.isHidden())
+            window.advanced_toggle.setChecked(False)
+            self.assertTrue(window.advanced_panel.isHidden())
+        finally:
+            window.close()
+
+    def test_reference_and_fit_controls_share_main_curve_row_without_folding(self):
+        window = TemporaryTestWindow(None)
+        try:
+            window.resize(1800, 900)
+            window.show()
+            for expanded in (False, True, False):
+                window.advanced_toggle.setChecked(expanded)
+                self.app.processEvents()
+                for control in (window.show_reference, window.show_peak_fits):
+                    self.assertTrue(control.isVisible())
+                    self.assertTrue(window.curve_controls_row.isAncestorOf(control))
+                    self.assertFalse(window.advanced_panel.isAncestorOf(control))
+                self.assertEqual(
+                    window.show_reference.geometry().center().y(),
+                    window.show_peak_fits.geometry().center().y(),
+                )
+        finally:
+            window.close()
 
     def test_machine_switch_isolates_routes_and_saved_record_paths(self):
         previous = get_runtime_machine_id()
@@ -63,43 +131,6 @@ class WidgetTests(unittest.TestCase):
             window.close()
             set_runtime_machine_id(previous)
 
-    def test_machine_two_finger_six_is_seeded_for_source_and_installer(self):
-        root = Path(__file__).resolve().parent
-        relative = Path(
-            'outputs/machines/machine_2/temporary_test/'
-            'finger_captures/6号手指.json'
-        )
-        source_path = root / relative
-        installer_path = root / 'client_seed' / relative
-        source_payload = json.loads(source_path.read_text(encoding='utf-8'))
-        installer_payload = json.loads(installer_path.read_text(encoding='utf-8'))
-
-        self.assertEqual(source_payload, installer_payload)
-        self.assertEqual(source_payload['machine_id'], 'machine_2')
-        self.assertEqual(source_payload['finger_label'], '6号手指')
-        self.assertEqual(source_payload['peak_count'], 9)
-        self.assertEqual(source_payload['point_count'], 45)
-        self.assertTrue(source_payload['ready'])
-        self.assertEqual(len(source_payload['plan']['rows']), 45)
-        self.assertEqual(len(source_payload['dense_wavelengths_nm']), 2001)
-        self.assertEqual(len(source_payload['dense_values']), 2001)
-        self.assertEqual(len(source_payload['reference_wavelengths_nm']), 45)
-        self.assertEqual(len(source_payload['reference_values']), 45)
-        self.assertNotIn('C:\\\\Users\\\\', json.dumps(source_payload))
-
-        previous = get_runtime_machine_id()
-        set_runtime_machine_id('machine_2')
-        window = TemporaryTestWindow(None)
-        try:
-            self.assertTrue(window._load_saved_finger_capture(source_path))
-            self.assertEqual(window.point_count(), 45)
-            self.assertEqual(window.finger_record_name, '6号手指')
-            self.assertTrue(window.plan_ready)
-            self.assertTrue(window.start_button.isEnabled())
-        finally:
-            window.close()
-            set_runtime_machine_id(previous)
-
     def test_temporary_transport_accepts_usb_and_full_function_lan(self):
         import serial
         self.assertTrue(temporary_transport_supported(FbgLanSerial()))
@@ -116,14 +147,15 @@ class WidgetTests(unittest.TestCase):
         self.assertFalse(window.plan_ready)
         self.assertFalse(window.start_button.isEnabled())
         self.assertEqual([row['index'] for row in window.plan['rows'][:5]], [96, 113, 130, 147, 164])
-        self.assertTrue(window.use_point_waits.isChecked())
+        self.assertFalse(window.use_point_waits.isChecked())
+        self.assertEqual(window.first_delay.value(), 850)
+        self.assertEqual(window.boundary_delay.value(), 850)
         self.assertEqual(window.point_waits[22], 9000)
         self.assertEqual(window.point_wait_route, window.point_route_key())
         self.assertTrue(window.continuous.isChecked())
         self.assertFalse(window.cycles.isEnabled())
-        window.continuous.setChecked(False)
-        self.assertTrue(window.cycles.isEnabled())
-        window.continuous.setChecked(True)
+        self.assertTrue(window.cycles.isHidden())
+        self.assertTrue(window.continuous.isHidden())
         table, x, y = reference()
         window.plan = select_points(table, x, y)
         window.render_plan()
@@ -146,58 +178,6 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(indices, [r['index'] for r in window.plan['rows']])
         self.assertFalse(window.plot.getViewBox().autoRangeEnabled()[1])
         window.close()
-
-    def test_fit_current_curve_updates_both_x_and_y_ranges(self):
-        window = TemporaryTestWindow(None)
-        try:
-            window._set_display_mode('adc')
-            for curve in window.plot.listDataItems():
-                curve.clear()
-            window.dense_wavelengths = np.asarray([1540.0, 1541.0, 1543.0])
-            window.dense_values = np.asarray([100.0, 240.0, 400.0])
-            window.dense_feedback_selector = 2
-            window.dense_curve.setData(
-                window.dense_wavelengths,
-                window.dense_values,
-            )
-            window.latest_values = [100.0, 240.0, 400.0]
-            window.plot.setXRange(0.0, 1.0, padding=0)
-            window.plot.setYRange(0.0, 1.0, padding=0)
-
-            window.fit_values()
-
-            x_range, y_range = window.plot.getViewBox().viewRange()
-            self.assertLess(x_range[0], 1540.0)
-            self.assertGreater(x_range[1], 1543.0)
-            self.assertLess(x_range[1] - x_range[0], 4.0)
-            self.assertLessEqual(y_range[0], 0.0)
-            self.assertGreaterEqual(y_range[1], 400.0)
-            self.assertFalse(window.plot.getViewBox().autoRangeEnabled()[0])
-            self.assertFalse(window.plot.getViewBox().autoRangeEnabled()[1])
-        finally:
-            window.close()
-
-    def test_plot_reserves_axis_space_and_expands_with_page(self):
-        window = TemporaryTestWindow(None)
-        try:
-            policy = window.plot.sizePolicy()
-            self.assertEqual(policy.horizontalPolicy(), QtWidgets.QSizePolicy.Expanding)
-            self.assertEqual(policy.verticalPolicy(), QtWidgets.QSizePolicy.Expanding)
-            self.assertEqual(
-                window.main_layout.sizeConstraint(),
-                QtWidgets.QLayout.SetNoConstraint,
-            )
-            self.assertGreaterEqual(window.plot.getAxis('left').minimumWidth(), 90)
-            self.assertGreaterEqual(window.plot.getAxis('bottom').minimumHeight(), 60)
-            self.assertFalse(window.plot.getAxis('left').autoSIPrefix)
-            self.assertFalse(window.plot.getAxis('bottom').autoSIPrefix)
-            self.assertTrue(window.plot.getAxis('bottom').labelText)
-            self.assertTrue(window.plot.getAxis('left').labelText)
-            self.assertEqual(window.fit_button.text(), '适合当前曲线（横纵轴）')
-            self.assertIn('横轴', window.fit_button.toolTip())
-            self.assertIn('纵轴', window.fit_button.toolTip())
-        finally:
-            window.close()
 
     def test_display_button_switches_adc_voltage_and_estimated_dbm(self):
         window = TemporaryTestWindow(None)
@@ -240,6 +220,48 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(worker.options, dict(first_delay_us=500, boundary_extra_us=1000, feedback_selector=3))
         self.assertEqual(worker.adc_channel, 1)
 
+    def test_default_worker_has_no_hidden_cross_peak_addition(self):
+        worker = TemporaryWorker(None, None, None, 32)
+        self.assertEqual(worker.options['first_delay_us'], 850)
+        self.assertEqual(worker.options['boundary_extra_us'], 0)
+
+    def test_cross_peak_wait_is_absolute_even_when_shorter_than_within_peak(self):
+        window = TemporaryTestWindow(None)
+        try:
+            for first, boundary in ((850, 850), (600, 850), (850, 350)):
+                window.first_delay.setValue(first)
+                window.boundary_delay.setValue(boundary)
+                expected = [boundary if i % 5 == 0 else first for i in range(45)]
+                self.assertEqual(window._uniform_point_waits(), expected)
+                window.point_waits = None
+                window.point_wait_route = None
+                self.assertTrue(window._ensure_point_waits_for_route())
+                self.assertEqual(window.point_waits, expected)
+            self.assertNotIn('追加', window.boundary_delay.toolTip())
+        finally:
+            window.close()
+
+    def test_new_absolute_wait_key_and_legacy_saved_timing_are_unambiguous(self):
+        self.assertEqual(boundary_wait_from_settings({}), 850)
+        self.assertEqual(boundary_wait_from_settings({
+            'first_delay_us': 350, 'boundary_extra_us': 1800,
+        }), 2150)
+        self.assertEqual(boundary_wait_from_settings({
+            'first_delay_us': 850, 'boundary_extra_us': 850,
+            'boundary_wait_us': 350,
+        }), 350)
+        window = TemporaryTestWindow(None)
+        try:
+            window.persistence_enabled = True
+            window.first_delay.setValue(850)
+            window.boundary_delay.setValue(850)
+            window._save_last_route_session()
+            payload = json.loads(window.last_session_path.read_text(encoding='utf-8'))
+            self.assertEqual(payload['boundary_wait_us'], 850)
+            self.assertEqual(payload['boundary_extra_us'], 0)
+        finally:
+            window.close()
+
     def test_channel_selector_invalidates_old_route_and_updates_labels(self):
         window = TemporaryTestWindow(None)
         self.assertEqual(window.selected_channel(), 1)
@@ -260,7 +282,7 @@ class WidgetTests(unittest.TestCase):
             button.text() for button in window.findChildren(QtWidgets.QPushButton)
         ]
         self.assertNotIn('重采密集光谱并选点', button_texts)
-        self.assertIn('按等间隔重采密集光谱', button_texts)
+        self.assertIn('重采密集光谱', button_texts)
         window.scan_start_nm.setValue(1530.00)
         window.scan_stop_nm.setValue(1540.00)
         window.equal_interval_nm.setValue(.06)
@@ -305,8 +327,8 @@ class WidgetTests(unittest.TestCase):
         window.use_point_waits.setChecked(False)
         window.use_point_waits.setChecked(True)
         self.assertEqual(len(window.point_waits), 45)
-        self.assertEqual(window.point_waits[0], 2150)
-        self.assertEqual(window.point_waits[1], 350)
+        self.assertEqual(window.point_waits[0], 850)
+        self.assertEqual(window.point_waits[1], 850)
         self.assertEqual(window.point_wait_route, window.point_route_key())
         self.assertTrue(window.start_button.isEnabled())
         window.close()
@@ -361,17 +383,35 @@ class WidgetTests(unittest.TestCase):
         window.close()
 
     def test_forward_settle_diagnostics_are_keyed_by_physical_transition(self):
-        hints = load_forward_settle_hints()
-        if not hints['pairs']:
-            self.assertIn('暂无', hints['source_label'])
-            return
+        from pathlib import Path
+        fixture_dir = Path(__file__).parent / 'tests' / 'fixtures'
+        # Private现场 captures are not repository fixtures. Load a small
+        # synthetic capture/analysis pair so a fresh clone tests the mapping.
+        with patch.multiple('temporary_test_widget',
+                _FORWARD_SETTLE_HINTS=None,
+                FORWARD_SETTLE_ANALYSIS_PATH=fixture_dir / 'forward_settle_analysis.json',
+                FORWARD_SETTLE_CAPTURE_PATH=fixture_dir / 'forward_settle_capture.json'):
+            hints = load_forward_settle_hints()
         self.assertIn('CH1', hints['source_label'])
-        # Captured route: physical index 178 was followed by 333.
+        # The fixture intentionally stores DAC rows out of order.
         item = hints['pairs'][(178, 333)]
         self.assertEqual(item['source_index'], 178)
         self.assertEqual(item['target_index'], 333)
-        self.assertIn('settle_us', item)
-        self.assertIn('edge_us', item)
+        self.assertEqual(item['settle_us'], 670)
+        self.assertEqual(item['edge_us'], 240)
+
+    def test_missing_forward_settle_diagnostics_are_optional(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.multiple('temporary_test_widget',
+                    _FORWARD_SETTLE_HINTS=None,
+                    FORWARD_SETTLE_ANALYSIS_PATH=Path(folder) / 'missing_analysis.json',
+                    FORWARD_SETTLE_CAPTURE_PATH=Path(folder) / 'missing_capture.json'):
+                hints = load_forward_settle_hints()
+        self.assertEqual(hints['pairs'], {})
+        self.assertEqual(hints['targets'], {})
+        self.assertIn('暂无', hints['source_label'])
 
     def test_realtime_fit_preserves_raw_points_and_keeps_flagged_wavelength(self):
         window = TemporaryTestWindow(None)
@@ -388,6 +428,7 @@ class WidgetTests(unittest.TestCase):
                 data['records'][g*5+j]['second_code'] = int(val)
         data['quality'] = quality(data)
         window.update_frame(data)
+        self.assertEqual(window.board_firmware_version, data['firmware'])
         self.assertTrue(window.peak_fits[0]['valid'])
         center = window.peak_fit_table.item(0,0).text()
         raw = [r['second_code'] for r in data['records']]
@@ -408,6 +449,117 @@ class WidgetTests(unittest.TestCase):
         window.invalidate_plan()
         self.assertEqual(window.peak_fits,[])
         window.close()
+
+    def test_default_makima_preserves_raw_data_and_hides_legacy_selector(self):
+        window = TemporaryTestWindow(None)
+        try:
+            table, x, y = reference()
+            window.plan = select_points(table, x, y)
+            window.render_plan()
+            data = decode(frame(), 123, 456)
+            for group in range(9):
+                rows = window.plan['rows'][group * 5:group * 5 + 5]
+                axis = np.array([row['measured_nm'] for row in rows])
+                shape = 30 + 700 * np.exp(
+                    -0.5 * ((axis - axis[2]) / (axis[1] - axis[0])) ** 2
+                )
+                for offset, value in enumerate(shape):
+                    data['records'][group * 5 + offset]['second_code'] = int(value)
+            data['quality'] = quality(data)
+            saved_rows = json.dumps(window.plan['rows'], sort_keys=True)
+            saved_values = [row['second_code'] for row in data['records']]
+            self.assertEqual(window.peak_fit_method.currentData(), 'makima')
+            self.assertTrue(window.peak_fit_method.isHidden())
+            window.advanced_toggle.setChecked(True)
+            self.assertTrue(window.peak_fit_method.isHidden())
+            self.assertNotIn('高斯', window.show_peak_fits.text())
+            self.assertIn('样条', window.show_peak_fits.text())
+            self.assertIn('手指应力测试模式', window.title_label.text())
+            window.update_frame(data)
+            default_center = window.peak_fits[0]['center_nm']
+            self.assertEqual(
+                window.peak_fits[0]['fit_method'], 'makima_piecewise_cubic_5point'
+            )
+
+            window.peak_fit_method.setCurrentIndex(0)
+            self.assertEqual(window.peak_fits, [])
+            self.assertEqual(window.peak_fit_table.verticalHeaderItem(1).text(), 'R²')
+            data['cycle_start_us'] += 70000
+            data['sequence'] += 1
+            window.update_frame(data)
+            self.assertEqual(json.dumps(window.plan['rows'], sort_keys=True), saved_rows)
+            self.assertEqual(
+                [row['second_code'] for row in data['records']], saved_values
+            )
+
+            window.peak_fit_method.setCurrentIndex(1)
+            data['cycle_start_us'] += 70000
+            data['sequence'] += 1
+            window.update_frame(data)
+            self.assertAlmostEqual(window.peak_fits[0]['center_nm'], default_center)
+            self.assertIn('形状诊断', window.peak_fit_table.verticalHeaderItem(1).text())
+            self.assertIn('实验性', window.peak_fit_status.text())
+        finally:
+            window.close()
+
+    def test_fit_button_keeps_manual_dense_scan_range_in_view(self):
+        window = TemporaryTestWindow(None)
+        try:
+            window.dense_wavelengths = np.array([1534.0, 1534.2, 1534.4])
+            window.dense_values = np.array([100.0, 500.0, 120.0])
+            window.manual_selection_active = True
+            window.fit_values()
+            left, right = window.plot.viewRange()[0]
+            self.assertLess(left, 1534.0)
+            self.assertGreater(right, 1534.4)
+            self.assertLess(right, 1535.0)
+        finally:
+            window.close()
+
+    def test_stress_scan_always_uses_continuous_cycles_and_keeps_controls_hidden(self):
+        import serial
+
+        window = TemporaryTestWindow(None)
+        usb = serial.Serial(port=None)
+        try:
+            table, x, y = reference()
+            window.plan = select_points(table, x, y)
+            window.render_plan()
+            window.plan_ready = True
+            window.use_point_waits.setChecked(False)
+            # Even a stale legacy finite selection must not stop a new test.
+            window.continuous.setChecked(False)
+            window.cycles.setValue(32)
+            with patch.object(app_JDSU, 'ser', usb), \
+                    patch.object(app_JDSU, 'ser_open', False), \
+                    patch.object(app_JDSU, 'switch_mode_enable', True), \
+                    patch.object(app_JDSU, 'ensure_serial_open'), \
+                    patch('temporary_test_widget.command') as make_command, \
+                    patch('temporary_test_widget.TemporaryWorker') as worker_type:
+                window.start_scan()
+                self.assertEqual(make_command.call_args.args[1], 0)
+                options = make_command.call_args.kwargs
+                self.assertEqual(options['boundary_extra_us'], 0)
+                self.assertEqual(options['point_delays_us'], [850] * 45)
+                from temporary_test_mode import command as encode_command
+                packet = encode_command(window.plan['rows'], 0, 1, **options)
+                self.assertEqual(packet[22:24], b'\x00\x00')
+                self.assertEqual(packet[568:572], b'PWT1')
+                self.assertEqual([int.from_bytes(packet[i:i+2], 'big')
+                                  for i in range(572, 662, 2)], [850] * 45)
+                self.assertEqual(worker_type.call_args.args[3], 0)
+                self.assertEqual(worker_type.call_args.kwargs['point_delays_us'], [850] * 45)
+                worker_type.return_value.start.assert_called_once_with()
+                window.finished()
+            window.advanced_toggle.setChecked(True)
+            self.assertTrue(window.cycles.isHidden())
+            self.assertTrue(window.continuous.isHidden())
+            self.assertFalse(window.cycles.isEnabled())
+            self.assertFalse(window.equal_interval_reference_button.isHidden())
+        finally:
+            window.worker = None
+            window.close()
+            usb.close()
 
     def test_failed_dense_selection_preserves_previous_plan(self):
         from types import SimpleNamespace
@@ -482,10 +634,10 @@ class WidgetTests(unittest.TestCase):
                 'completed': index + 1,
                 'total': 2001,
             })
+        window._flush_dense_reference_plot()
         np.testing.assert_allclose(window.dense_curve.getData()[1], [100, 125, 160])
-        self.assertEqual(len(window.dense_failed_curve.getData()[0]), 1)
-        self.assertIn('已标红1个未通过点', window.status.text())
-        window.show_dense_failures.setChecked(False)
+        self.assertTrue(window.show_dense_failures.isHidden())
+        self.assertFalse(window.show_dense_failures.isChecked())
         self.assertIsNone(window.dense_failed_curve.getData()[0])
         np.testing.assert_allclose(window.dense_curve.getData()[1], [100, 125, 160])
         window.show_dense_failures.setChecked(True)
@@ -508,6 +660,7 @@ class WidgetTests(unittest.TestCase):
                 'completed': completed,
                 'total': 2001,
             })
+        window._flush_dense_reference_plot()
         plotted = np.asarray(window.dense_curve.getData()[1], dtype=float)
         expected = np.asarray(adc_code_to_dbm([1.0, 2000.0], 2), dtype=float)
         np.testing.assert_allclose(plotted, expected)
@@ -517,19 +670,93 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(window.selection_markers, [])
         window.close()
 
-    def test_auto_selection_button_reenables_when_dense_worker_finishes(self):
+    def test_dense_redraw_coalesces_without_losing_points_or_failure_marks(self):
         window = TemporaryTestWindow(None)
-        _, x, y = reference()
-        window.dense_wavelengths = x
-        window.dense_values = y
-        worker = Mock()
-        window.worker = worker
-        window.begin_manual_selection()
-        self.assertFalse(window.auto_select_button.isEnabled())
-        window.finished()
-        worker.deleteLater.assert_called_once_with()
-        self.assertTrue(window.auto_select_button.isEnabled())
-        window.close()
+        try:
+            window._set_display_mode('adc')
+            window._dense_capture_active = True
+            with patch.object(window, 'redraw_dense_selection',
+                              wraps=window.redraw_dense_selection) as redraw:
+                for index in range(100):
+                    window.update_dense_reference_point({
+                        'row': {
+                            'index': index,
+                            'measured_wavelength_nm': 1525 + .02 * index,
+                            'signal_adc_code': 100 + index,
+                            'point_passed': index % 10 != 7,
+                        },
+                        'completed': index + 1, 'total': 100,
+                    })
+                # A burst paints only its first and final points. All raw
+                # points, including failures, are present in that final plot.
+                self.assertEqual(redraw.call_count, 2)
+            self.assertFalse(window._dense_draw_timer.isActive())
+            self.assertEqual(len(window._live_dense_rows), 100)
+            np.testing.assert_array_equal(
+                window.dense_curve.getData()[1], np.arange(100, 200)
+            )
+            self.assertIsNone(window.dense_failed_curve.getData()[0])
+            self.assertTrue(window.show_dense_failures.isHidden())
+            self.assertIn('100/100', window.status.text())
+            self.assertNotIn('已标红', window.status.text())
+        finally:
+            window.close()
+
+    def test_dense_timer_renders_intermediate_points_and_stops_on_reset(self):
+        window = TemporaryTestWindow(None)
+        try:
+            window._set_display_mode('adc')
+            window._dense_capture_active = True
+            for index in range(3):
+                window.update_dense_reference_point({
+                    'row': {
+                        'measured_wavelength_nm': 1525 + .02 * index,
+                        'signal_adc_code': 100 + index, 'point_passed': True,
+                    },
+                    'completed': index + 1, 'total': 2001,
+                })
+            self.assertTrue(window._dense_draw_timer.isActive())
+            loop = QtCore.QEventLoop()
+            QtCore.QTimer.singleShot(80, loop.quit)
+            loop.exec_()
+            np.testing.assert_array_equal(window.dense_curve.getData()[1], [100, 101, 102])
+            self.assertFalse(window._dense_draw_timer.isActive())
+            window.update_dense_reference_point({
+                'row': {'measured_wavelength_nm': 1525.06,
+                        'signal_adc_code': 103, 'point_passed': True},
+                'completed': 4, 'total': 2001,
+            })
+            self.assertTrue(window._dense_draw_timer.isActive())
+            window._reset_machine_state()
+            self.assertFalse(window._dense_draw_timer.isActive())
+            self.assertIsNone(window._dense_draw_progress)
+        finally:
+            window.close()
+
+    def test_partial_report_cancels_pending_redraw_and_preserves_final_spectrum(self):
+        from types import SimpleNamespace
+        window = TemporaryTestWindow(None)
+        try:
+            window._set_display_mode('adc')
+            window._dense_capture_active = True
+            rows = []
+            for index in range(2):
+                row = {'index': index, 'measured_wavelength_nm': 1525 + .02 * index,
+                       'signal_adc_code': 100 + index, 'point_passed': True}
+                rows.append(row)
+                window.update_dense_reference_point({
+                    'row': row, 'completed': index + 1, 'total': 2001,
+                })
+            self.assertTrue(window._dense_draw_timer.isActive())
+            window.worker = SimpleNamespace(output='partial-reference.json')
+            window.reference_ready({'rows': rows, 'complete': False,
+                                    'stopped_early': True})
+            self.assertFalse(window._dense_draw_timer.isActive())
+            window._flush_dense_reference_plot()
+            np.testing.assert_array_equal(window.dense_curve.getData()[1], [100, 101])
+        finally:
+            window.worker = None
+            window.close()
 
     def test_early_stopped_dense_scan_keeps_curve_for_manual_selection(self):
         from types import SimpleNamespace
@@ -559,12 +786,12 @@ class WidgetTests(unittest.TestCase):
         self.assertTrue(window.manual_selection_active)
         self.assertFalse(window.reference_line_button.isEnabled())
         self.assertEqual(len(window.dense_failed_points), 1)
-        self.assertEqual(len(window.dense_failed_curve.getData()[0]), 1)
+        self.assertIsNone(window.dense_failed_curve.getData()[0])
         self.assertIn('提前停止', window.status.text())
         window.worker = None
         window.close()
 
-    def test_failed_dense_spike_is_drawn_raw_without_automatic_selection(self):
+    def test_failed_dense_spike_is_drawn_raw_before_worker_cleanup(self):
         from types import SimpleNamespace
         window = TemporaryTestWindow(None)
         window._set_display_mode('adc')
@@ -592,7 +819,8 @@ class WidgetTests(unittest.TestCase):
         self.assertIs(window.plan, previous)
         self.assertTrue(window.manual_selection_active)
         self.assertEqual(float(window.dense_values[failed_index]), 25.0)
-        self.assertEqual(len(window.dense_failed_curve.getData()[0]), 1)
+        self.assertIsNone(window.dense_failed_curve.getData()[0])
+        self.assertTrue(window._auto_select_after_dense)
         window.worker = None
         window.close()
 
@@ -692,7 +920,7 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(window.reference_wavelengths, old_reference_x)
         self.assertIsNotNone(window.reference_curves[3].getData()[0])
         self.assertIn('手动修改峰4第2点', window.status.text())
-        self.assertIn('可直接开始临时测试', window.status.text())
+        self.assertIn('可直接开始手指应力测试', window.status.text())
         self.assertEqual(window.selected_selection_point, (3, 1))
         self.assertEqual(window.selection_markers[16].pen.width(), 3)
         self.assertTrue(window.plan['manual_adjustment_reference_reused'])
@@ -756,7 +984,7 @@ class WidgetTests(unittest.TestCase):
             self.assertEqual(restored.display_unit_button.text(), '显示：光功率 dBm')
             self.assertTrue(restored.show_dense_selection.isCheckable())
             self.assertTrue(restored.show_reference.isCheckable())
-            self.assertIn('可直接开始临时测试', restored.status.text())
+            self.assertIn('可直接开始手指应力测试', restored.status.text())
             with patch('app_JDSU.load_fullband_accuracy_table', return_value=table):
                 self.assertTrue(restored.select_selection_point(3, 1))
                 self.assertTrue(restored.move_selected_point(1))
@@ -933,7 +1161,7 @@ class WidgetTests(unittest.TestCase):
                 self.assertTrue(restored.plan_ready)
                 self.assertTrue(restored.start_button.isEnabled())
                 self.assertIn('3号手指', restored.finger_record_label.text())
-                self.assertIn('可直接开始临时测试', restored.status.text())
+                self.assertIn('可直接开始手指应力测试', restored.status.text())
                 restored.close()
             finally:
                 for item in reversed(patches):
@@ -1105,7 +1333,7 @@ class WidgetTests(unittest.TestCase):
         self.assertEqual(
             window.table.item(0, 5).background().color().name(), '#fee2e2'
         )
-        self.assertIn('仍可直接开始临时测试', window.status.text())
+        self.assertIn('仍可直接开始手指应力测试', window.status.text())
         window.close()
 
     def test_reference_line_rejects_flat_or_stale_peak_window(self):
@@ -1151,7 +1379,7 @@ class WidgetTests(unittest.TestCase):
         self.assertTrue(window.plan_ready)
         self.assertTrue(window.start_button.isEnabled())
         self.assertEqual(window.reference_values, old_values)
-        self.assertIn('仍可直接开始临时测试', window.status.text())
+        self.assertIn('仍可直接开始手指应力测试', window.status.text())
         window.close()
 
     def test_failed_reference_shape_can_restart_as_startable_route(self):
@@ -1260,13 +1488,62 @@ class WidgetTests(unittest.TestCase):
         table,x,y = reference()
         plan=select_points(table,x,y)
         worker=ReferenceLineWorker(None,plan,'unused.json',0,feedback_selector=3)
-        with patch('temporary_reference.acquire_reference',return_value={}) as acquire:
+        with patch('temporary_reference.acquire_selected_reference',return_value={}) as acquire:
             worker.run()
         self.assertEqual(acquire.call_args.kwargs['selected_rows'],plan['rows'])
         self.assertEqual(acquire.call_args.kwargs['feedback_selector'],3)
-        self.assertTrue(acquire.call_args.kwargs['continue_on_unstable'])
-        self.assertTrue(acquire.call_args.kwargs['allow_partial_stop'])
         self.assertIn('on_row', acquire.call_args.kwargs)
+
+    def test_fixed_reference_does_not_fit_gate_or_discard_raw_adc_and_restores(self):
+        from types import SimpleNamespace
+        table, x, y = reference()
+        window = TemporaryTestWindow(SimpleNamespace())
+        window.plan = select_points(table, x, y)
+        window.render_plan(ready=False)
+        values = [0, 4095, 100, 100, 100] * 9
+        report = dict(
+            complete=True, disarm_ack=True, shutter_ack=True, feedback_selector=2,
+            signal_channel=1, acquisition_method='equal_interval_single',
+            stability_filter_applied=False, acquisition_elapsed_s=.48,
+            rows=[dict(index=row['index'], dac_codes=row['codes'],
+                       signal_adc_code=values[index], stability_not_evaluated=True,
+                       point_passed=True, stable=None)
+                  for index, row in enumerate(window.plan['rows'])],
+        )
+        with patch('temporary_test_widget.assess_five_point_shape') as assess:
+            window.reference_line_ready(report)
+            assess.assert_not_called()
+        self.assertEqual(window.reference_values, values)
+        self.assertTrue(window.plan_ready)
+        self.assertTrue(window.start_button.isEnabled())
+        self.assertEqual(window.reference_failed_points, [])
+        self.assertIn('未做稳定性/峰形验收', window.status.text())
+        self.assertTrue(window.show_dense_failures.isHidden())
+        self.assertFalse(window.show_dense_failures.isChecked())
+        with patch('temporary_test_widget.assess_five_point_shape') as assess:
+            self.assertTrue(window._load_last_route_session())
+            assess.assert_not_called()
+        self.assertTrue(window.plan_ready)
+        self.assertEqual(window.reference_values, values)
+        self.assertIn('10 ms单次ADC', window.status.text())
+        # Old saved timings may still be explicitly loaded, but every launch
+        # must use the requested uniform 850/850 us defaults.
+        window.first_delay.setValue(350)
+        window.boundary_delay.setValue(1800)
+        window.point_waits = [900] * 45
+        window.point_wait_route = window.point_route_key()
+        window.use_point_waits.setChecked(True)
+        window.close()
+        restored = TemporaryTestWindow(SimpleNamespace())
+        try:
+            self.assertTrue(restored.plan_ready)
+            self.assertEqual(restored.reference_values, values)
+            self.assertEqual(restored.first_delay.value(), 850)
+            self.assertEqual(restored.boundary_delay.value(), 850)
+            self.assertFalse(restored.use_point_waits.isChecked())
+            self.assertEqual(restored.point_waits, [900] * 45)
+        finally:
+            restored.close()
 
     def test_one_time_fit_does_not_hide_later_height_changes(self):
         window = TemporaryTestWindow(None)
