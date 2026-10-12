@@ -233,13 +233,15 @@ class OtaMachineProfileStore:
             "board_ip": str(stored.get("board_ip", "")),
             "package_path": package_path,
             "password": password,
+            "mqtt_device_id": str(stored.get("mqtt_device_id", "")),
         }
 
     def lan_board_ip(self, machine_id: str) -> str:
-        """Use only the selected unit's saved IP for full-function LAN control.
+        """Return the selected unit's pinned LAN target without decrypting OTA credentials.
 
-        This lookup deliberately avoids decrypting OTA credentials and never
-        falls back to subnet discovery, which may find another powered board.
+        Full-function LAN control must never fall back to subnet-wide discovery:
+        another powered unit may answer first while a different machine's
+        wavelength table is selected in the application.
         """
 
         if machine_id not in MACHINE_LABELS:
@@ -265,6 +267,7 @@ class OtaMachineProfileStore:
         board_ip: str,
         password: str,
         package_path: str,
+        mqtt_device_id: str = "",
     ) -> None:
         if machine_id not in MACHINE_LABELS:
             raise ValueError(f"不支持的机号：{machine_id}")
@@ -272,6 +275,7 @@ class OtaMachineProfileStore:
             "machine_label": MACHINE_LABELS[machine_id],
             "board_ip": str(board_ip).strip(),
             "package_path": str(package_path).strip(),
+            "mqtt_device_id": str(mqtt_device_id).strip(),
             "password_dpapi": self._protector(password) if password else "",
         }
         self._data.setdefault("machines", {})[machine_id] = record

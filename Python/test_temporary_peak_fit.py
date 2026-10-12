@@ -1,72 +1,64 @@
 import unittest
-
 import numpy as np
+from temporary_peak_fit import fit_five_points, fit_temporary_frame
 
-from temporary_peak_fit import fit_five_points
 
+class PeakFitTests(unittest.TestCase):
+    def test_shifted_gaussian_not_pinned_to_middle(self):
+        x = 1535+np.linspace(-.6, .6, 5)
+        for shift in (-.22, 0., .18):
+            y = 30+700*np.exp(-.5*((x-(1535+shift))/.25)**2)
+            saved = y.copy()
+            fit = fit_five_points(x, y)
+            self.assertTrue(fit['valid'], fit)
+            self.assertAlmostEqual(fit['center_nm'], 1535+shift, delta=.002)
+            self.assertFalse(fit['optical_accuracy_verified'])
+            np.testing.assert_array_equal(y, saved)
+            self.assertGreaterEqual(min(fit['curve_x_nm']), x[0])
+            self.assertLessEqual(max(fit['curve_x_nm']), x[-1])
 
-class FivePointCubicFitTests(unittest.TestCase):
-    def test_asymmetric_peak_uses_five_point_makima_center(self):
-        """An asymmetric peak must not be pulled to a symmetric Gaussian centre."""
+    def test_unusual_finite_shapes_still_have_a_flagged_fit(self):
+        x = np.arange(5)*.3+1535
+        for y in ([5]*5, [10,100,4090,100,10], [10,100,200,300,500],
+                  [10,300,50,400,10], [0,2,10,3,0]):
+            result = fit_five_points(x, y)
+            self.assertFalse(result['valid'])
+            self.assertTrue(result['fit_available'])
+            self.assertIsNotNone(result['center_nm'])
+            self.assertEqual(len(result['curve_x_nm']), 101)
+            self.assertIn('可能有问题', result['reason'])
 
-        x = np.asarray([-2.0, -1.0, 0.0, 1.0, 2.0])
-        true_center = 0.30
-        sigma = np.where(x < true_center, 0.80, 1.40)
-        y = 100.0 + 1000.0 * np.exp(
-            -0.5 * ((x - true_center) / sigma) ** 2
-        )
-
-        result = fit_five_points(x, y)
-
-        self.assertTrue(result['fit_available'])
-        self.assertEqual(result['fit_method'], 'makima_piecewise_cubic_5point')
-        self.assertLess(abs(result['center_nm'] - true_center), 0.08)
-        self.assertEqual(result['input_point_count'], 5)
-
-    def test_rendered_curve_passes_through_all_five_measured_points(self):
-        """The displayed cubic peak must preserve the five physical samples."""
-
-        x = np.asarray([1528.54, 1528.78, 1528.92, 1529.12, 1529.30])
-        y = np.asarray([1882.0, 3676.0, 4049.0, 3111.0, 1651.0])
-
-        result = fit_five_points(x, y)
-        curve_x = np.asarray(result['curve_x_nm'], dtype=float)
-        curve_y = np.asarray(result['curve_adc'], dtype=float)
-        rendered_at_samples = np.interp(x, curve_x, curve_y)
-
-        np.testing.assert_allclose(rendered_at_samples, y, atol=0.5, rtol=0.0)
-        self.assertGreater(result['center_nm'], x[1])
-        self.assertLess(result['center_nm'], x[3])
-        self.assertGreater(result['peak_adc'], max(y[0], y[-1]))
-
-    def test_five_point_frame_keeps_one_result_per_peak(self):
-        from temporary_peak_fit import fit_temporary_frame
-
-        rows = [
-            {'measured_nm': 1530.0 + 0.1 * index}
-            for index in range(10)
-        ]
-        values = [100, 300, 900, 500, 150, 80, 260, 700, 420, 120]
-
-        results = fit_temporary_frame(rows, values, warmed_up=True)
-
-        self.assertEqual(len(results), 2)
-        self.assertTrue(all(result['input_point_count'] == 5 for result in results))
-        self.assertTrue(all(result['fit_method'] == 'makima_piecewise_cubic_5point'
-                            for result in results))
-
-    def test_irregular_shape_retains_nontrivial_quality_diagnostic(self):
-        """Exact interpolation must not turn every malformed peak into R²=1."""
-
-        result = fit_five_points(
-            [0.0, 0.1, 0.2, 0.3, 0.4],
-            [68.0, 314.0, 211.0, 54.0, 180.0],
-        )
-
-        self.assertLess(result['r_squared'], 0.90)
-        self.assertGreater(result['rmse_adc'], 0.0)
+    def test_nonfinite_data_is_the_only_kind_without_a_fit(self):
+        x = np.arange(5)*.3+1535
+        result = fit_five_points(x, [10,100,np.nan,100,10])
         self.assertFalse(result['valid'])
+        self.assertFalse(result['fit_available'])
+        self.assertIsNone(result['center_nm'])
+
+    def test_unsorted_wavelength_points_are_sorted_and_flagged(self):
+        x = 1535 + np.array([-.6, .3, 0., -.3, .6])
+        y = 30 + 700*np.exp(-.5*((x-1535.1)/.25)**2)
+        result = fit_five_points(x, y)
+        self.assertTrue(result['fit_available'])
+        self.assertFalse(result['valid'])
+        self.assertAlmostEqual(result['center_nm'], 1535.1, delta=.005)
+        self.assertIn('波长点顺序已重排', result['reason'])
+
+    def test_raw_scale_invariance_and_frame_groups(self):
+        x = np.linspace(1534.4,1535.6,5)
+        y = 30+400*np.exp(-.5*((x-1535.1)/.25)**2)
+        a, b = fit_five_points(x,y), fit_five_points(x,y*2)
+        self.assertTrue(a['valid'] and b['valid'])
+        self.assertAlmostEqual(a['center_nm'],b['center_nm'])
+        rows = [dict(measured_nm=float(v+g*2)) for g in range(9) for v in x]
+        values = np.tile(y,9)
+        result = fit_temporary_frame(rows, values)
+        self.assertEqual(len(result),9)
+        self.assertTrue(all(r['valid'] for r in result))
+        warmup = fit_temporary_frame(rows, values, False)
+        self.assertTrue(all(not r['valid'] and r['center_nm'] is None for r in warmup))
 
 
 if __name__ == '__main__':
     unittest.main()
+
