@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import time
+from touch_annotation_contract import require_single_position_annotation, require_single_position_session
 import numpy as np
 import torch
 from torch import nn
@@ -65,6 +66,7 @@ def build_model(kind):
 
 def extract_sample(frame):
     q = frame.get('quality') or {}
+    require_single_position_annotation(q)
     label = q.get('press_label')
     try:
         if label is None or int(label) != label or not 0 <= int(label) <= 25:
@@ -150,6 +152,7 @@ def metrics(labels, predicted, forces, predicted_force, valid):
 def load_sessions(paths, output):
     rows=[]; provenance=[]; audits=[]
     for session, root in enumerate(paths):
+        require_single_position_session(root)
         path=Path(root)/'frames.jsonl'
         digest=hashlib.sha256(); line_count=0; invalid=0; group=-1; last_label=None; counts={}; reference_counts={}
         with path.open('rb') as stream:

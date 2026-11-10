@@ -14,8 +14,10 @@ raises and the caller records ``paxini_force`` as null with the reason.
 from __future__ import annotations
 
 import struct
+import math
 import threading
 import time
+from collections import deque
 
 
 HEADER = b"\xAA\x55"
@@ -60,7 +62,7 @@ def parse_six_axis(payload: bytes):
 
 
 class PaxiniForceSensor:
-    """Auto-push six-axis reader; keeps the newest frame ready for capture."""
+    """Single-owner reader: AUTO uses CRC8/cmd05 RS485; explicit ports retain legacy."""
 
     def __init__(
         self,
@@ -88,6 +90,74 @@ class PaxiniForceSensor:
         self._calibration_payload = None
         self.zero_count = 0
         self.last_zero_ns = None
+        self._sample_lock = threading.RLock()
+        self.tare_offset = (0.0,) * 6
+        self.tare_count = 0
+        self.last_tare_ns = None
+        self.tare_source_ns = None
+        self._rate_receipts = deque(maxlen=4096)
+        self._rate_window_ns = 2_000_000_000
+
+    def _publish_sample(self, values):
+        with self._sample_lock:
+            self._latest = tuple(values)
+            self._latest_ns = time.monotonic_ns()
+            self._rate_receipts.append(self._latest_ns)
+            while self._rate_receipts and self._rate_receipts[0] < self._latest_ns - self._rate_window_ns:
+                self._rate_receipts.popleft()
+            self.frames_received += 1
+            self.last_error = None
+
+    def _clear_sample_session(self):
+        """Invalidate both latest force and rate across transport sessions."""
+        with self._sample_lock:
+            self._latest = self._latest_ns = None
+            self._rate_receipts.clear()
+
+    def _measurement_snapshot_locked(self, max_age_ms=500.0):
+        raw, stamp = self._latest, self._latest_ns
+        if (not self._running or not isinstance(stamp, int) or raw is None
+                or len(raw) != 6 or not all(math.isfinite(v) for v in raw)):
+            return None
+        now_ns = time.monotonic_ns()
+        age = (now_ns - stamp) / 1e6
+        if not 0 <= age <= max_age_ms:
+            return None
+        # Host effective receipt rate, not ADC timing or baud. Identical payloads
+        # are distinct received frames: this protocol has no sample sequence ID.
+        receipts = self._rate_receipts
+        while receipts and receipts[0] < now_ns - self._rate_window_ns:
+            receipts.popleft()
+        span_ns = receipts[-1] - receipts[0] if len(receipts) >= 2 else 0
+        rate_hz = (len(receipts) - 1) * 1e9 / span_ns if span_ns > 0 else None
+        return {
+            'sample_rate_hz': rate_hz, 'rate_window_s': self._rate_window_ns / 1e9,
+            'rate_sample_count': len(receipts),
+            'raw': list(raw),
+            'corrected': [v - offset for v, offset in zip(raw, self.tare_offset)],
+            'sample_monotonic_ns': stamp, 'age_ms': age,
+            'port': self.port, 'protocol': self.protocol,
+            'tare': {'mode': 'host_offset', 'offset_six_axis': list(self.tare_offset),
+                     'count': self.tare_count, 'monotonic_ns': self.last_tare_ns,
+                     'source_sample_monotonic_ns': self.tare_source_ns},
+        }
+
+    def measurement_snapshot(self, max_age_ms=500.0):
+        """Atomic fresh raw/corrected sample. Missing/stale stays None; no I/O."""
+        with self._sample_lock:
+            return self._measurement_snapshot_locked(max_age_ms)
+
+    def tare(self):
+        """Host-only six-axis offset: never sends a device calibration command."""
+        with self._sample_lock:
+            sample = self._measurement_snapshot_locked()
+            if sample is None:
+                raise RuntimeError('PX6D未连接、数据过期或六轴无效，不能采集力归零')
+            self.tare_offset = tuple(sample['raw'])
+            self.tare_count += 1
+            self.last_tare_ns = time.monotonic_ns()
+            self.tare_source_ns = sample['sample_monotonic_ns']
+            return self._measurement_snapshot_locked()
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -97,6 +167,7 @@ class PaxiniForceSensor:
         with self._lock:
             if self._running:
                 return
+            self._clear_sample_session()
             self._stop_event.clear()
             if self.auto_port:
                 self._running = True
@@ -125,13 +196,15 @@ class PaxiniForceSensor:
             self._thread = None
         if self._ser is not None:
             try:
-                self._ser.write(build_frame(0x02, b"\x00", self.device_id))
-                self._ser.flush()
-                time.sleep(0.05)
+                if self.protocol == "legacy":
+                    self._ser.write(build_frame(0x02, b"\x00", self.device_id))
+                    self._ser.flush()
+                    time.sleep(0.05)
                 self._ser.close()
             except Exception:
                 pass
             self._ser = None
+        self._clear_sample_session()
 
     def close(self):
         self.stop()
@@ -154,6 +227,16 @@ class PaxiniForceSensor:
             if rc8(body) != data[offset + 4 + length]:
                 continue
             if cmd != 0x03 or parse_six_axis(bytes(data[offset + 4:offset + 4 + length])) is not None:
+                return True
+        return False
+
+    @staticmethod
+    def _is_rs485_force_response(data):
+        for i in range(max(0, len(data) - 28)):
+            frame = bytes(data[i:i + 29])
+            if (frame[:2] == HEADER and frame[3] == 3
+                    and crc8(frame[:-1]) == frame[-1]
+                    and parse_six_axis(frame[4:-1]) is not None):
                 return True
         return False
 
@@ -182,13 +265,9 @@ class PaxiniForceSensor:
                     waiting = connection.in_waiting
                     if waiting:
                         data.extend(connection.read(min(waiting, 4096)))
-                        if self._is_px6d_response(data):
+                        if self._is_rs485_force_response(data):
                             self.port = item.device
-                            self.protocol = "rs485" if any(
-                                data[i:i+2] == HEADER and len(data) >= i+29
-                                and crc8(bytes(data[i:i+28])) == data[i+28]
-                                for i in range(max(0, len(data)-28))
-                            ) else "legacy"
+                            self.protocol = "rs485"
                             self.last_error = None
                             return connection
                     self._stop_event.wait(0.01)
@@ -205,7 +284,7 @@ class PaxiniForceSensor:
             if self._ser is None:
                 self._stop_event.wait(2.0)
                 continue
-            self._latest = self._latest_ns = None
+            self._clear_sample_session()
             try:
                 self._pump_rs485() if self.protocol == "rs485" else self._pump()
             finally:
@@ -214,11 +293,11 @@ class PaxiniForceSensor:
                 except Exception:
                     pass
                 self._ser = None
-                self._latest = self._latest_ns = None
+                self._clear_sample_session()
             self._stop_event.wait(0.5)
 
     def _pump_rs485(self):
-        """RS485 request-response: cmd 01 returns six little-endian float32 values."""
+        """RS485 cmd05 polling; CRC-validated cmd03 contains six float32 LE values."""
         buffer = bytearray()
         started = time.monotonic()
         next_query = 0.0
@@ -254,10 +333,7 @@ class PaxiniForceSensor:
                     if cmd in (1, 3):
                         values = parse_six_axis(frame[4:-1])
                         if values is not None:
-                            self._latest = values
-                            self._latest_ns = time.monotonic_ns()
-                            self.frames_received += 1
-                            self.last_error = None
+                            self._publish_sample(values)
                     else:
                         self._calibration_payload = frame[4:-1]
                         self._calibration_event.set()
@@ -329,15 +405,16 @@ class PaxiniForceSensor:
             return True
         if len(buffer) < 4 + expected + 1:
             return False
-        payload = bytes(buffer[4 : 4 + expected])
-        del buffer[: 4 + expected + 1]
+        frame = bytes(buffer[:4 + expected + 1])
+        if rc8(frame[2:-1]) != frame[-1]:
+            del buffer[:1]
+            return True
+        payload = frame[4:-1]
+        del buffer[:4 + expected + 1]
         if cmd == 0x03:
             values = parse_six_axis(payload)
             if values is not None:
-                self._latest = values
-                self._latest_ns = time.monotonic_ns()
-                self.frames_received += 1
-                self.last_error = None
+                self._publish_sample(values)
         elif cmd == 0x10:
             self._calibration_payload = payload
             self._calibration_event.set()
@@ -367,7 +444,7 @@ class PaxiniForceSensor:
         return self._calibration_payload
 
     def read_six_axis(self, timeout_s: float = 1.0):
-        """Return the newest hardware-zeroed six-axis tuple; raise when stale."""
+        """Legacy raw read (no host offset); GUI/capture use measurement_snapshot()."""
 
         deadline = time.monotonic() + timeout_s
         frames0 = self.frames_received

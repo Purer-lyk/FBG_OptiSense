@@ -1,4 +1,5 @@
 """dBm Sensor Token training/inference. Import only in Torch-first children."""
+from touch_annotation_contract import require_single_position_annotation, require_single_position_session
 import numpy as np
 import torch
 
@@ -16,6 +17,7 @@ def random_split(labels,seed=20261008):
 
 def extract_dbm_sample(frame):
     q=frame.get('quality') or {}
+    require_single_position_annotation(q)
     try:
         label=q.get('press_label')
         if label is None or int(label)!=label or not 0<=int(label)<=25:
@@ -97,6 +99,7 @@ def prepare_data(paths,output):
     from temporary_optical_units import adc_code_to_dbm
     rows=[]; provenance=[]; sources=[]; routes=None; selectors=set(); max_error=0.
     for sid,session in enumerate(paths):
+        require_single_position_session(session)
         source=session/'frames.jsonl'; digest=hashlib.sha256(); counts=Counter(); invalid=0; line_count=0; quality=Counter()
         with source.open('rb') as stream:
             for line_no,raw in enumerate(stream,1):

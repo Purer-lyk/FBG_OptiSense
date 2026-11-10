@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from touch_annotation_contract import require_single_position_annotation, require_single_position_session
 import numpy as np
 import torch
 from torch import nn
@@ -162,6 +163,7 @@ class TouchDataset:
 
 def _extract_frame(frame: dict) -> tuple[np.ndarray, int, np.ndarray, int] | None:
     quality = frame.get("quality") or {}
+    require_single_position_annotation(quality)
     label = quality.get("press_label")
     stable = quality.get("stable_adc")
     if stable is None:
@@ -196,6 +198,7 @@ def load_touch_dataset(
     """Stream the large JSONL once, then reuse a compact validated NPZ cache."""
 
     root = Path(session_dir).resolve()
+    require_single_position_session(root)
     frames_path = root / "frames.jsonl"
     if not frames_path.is_file():
         raise FileNotFoundError(f"未找到训练帧文件：{frames_path}")
@@ -378,6 +381,19 @@ class TouchModelBundle:
 def load_touch_model(path: str | Path) -> TouchModelBundle:
     source = Path(path).resolve()
     payload = torch.load(source, map_location="cpu", weights_only=False)
+    if payload.get("schema") == "fbg_touch45_multilabel_v1":
+        from touch_45_models import Measured45Bundle
+        return Measured45Bundle(source)
+    if payload.get("schema") == "fbg_touch_delta9_multilabel_v1":
+        from touch_delta9_models import Delta9Bundle
+        return Delta9Bundle(source)
+    if payload.get("schema") == "fbg_touch_temporal26_v1":
+        from touch_temporal_models import TemporalModelBundle
+        torch.set_num_threads(2)
+        return TemporalModelBundle(source)
+    if payload.get("schema") == "fbg_touch_separate26_v1":
+        from touch_separate_models import SeparateModelBundle
+        return SeparateModelBundle(source)
     if payload.get("schema") == "fbg_touch_dbm26_v1":
         from touch_dbm_training import DbmModelBundle
         return DbmModelBundle(source)
@@ -392,10 +408,17 @@ def prediction_payload(bundle: TouchModelBundle, adc_values) -> dict:
     """Return one JSON-safe real-time prediction from exactly 45 stable ADC values."""
 
     adc = np.asarray(adc_values, dtype=np.float32).reshape(-1)
-    if adc.shape != (45,) or not np.isfinite(adc).all():
-        raise ValueError("实时推理必须提供同一帧的45个有效稳定ADC值")
+    count=45
+    if adc.shape != (count,) or not np.isfinite(adc).all():
+        raise ValueError(f"实时推理必须提供同一帧的{count}个有效稳定ADC值")
+    if hasattr(bundle, "predict_payload"):
+        return bundle.predict_payload(adc)
     labels, forces, probabilities = bundle.predict(adc)
     probability_row = probabilities[0].astype(float)
+    if len(probability_row) == 26:
+        from touch_decision import decide_contact
+        decision = decide_contact(probability_row)
+        return dict(decision, probabilities=probability_row.tolist(), force=forces[0].astype(float).tolist())
     return {
         "position": int(labels[0]),
         "confidence": float(np.max(probability_row)),
@@ -408,24 +431,44 @@ def serve_touch_model(path: str | Path) -> None:
     """Persistent JSON-lines inference service, intentionally isolated from Qt."""
 
     bundle = load_touch_model(path)
+    from touch_live_sequence import LiveSequence
+    sequence = LiveSequence(bundle)
     print(json.dumps({
         "type": "ready",
         "model_path": str(bundle.path),
         "dataset_dir": bundle.report.get("dataset_dir"),
+        "input_contract": getattr(bundle,"input_contract",None),
         "input_shape": bundle.report.get("input_shape", [9, 5] if getattr(bundle, "kind", "") == "sensor_token" else [6, 4, 3]),
     }, ensure_ascii=False), flush=True)
     for line in sys.stdin:
+        request = None
         try:
             request = json.loads(line)
-            result = prediction_payload(bundle, request.get("adc"))
+            reset_reason = sequence.before(request)
+            if getattr(bundle, 'kind', '').startswith('measured45_'):
+                if request.get('input_contract')!=bundle.input_contract or 'dbm' not in request:raise ValueError('Requires bound45 dBm request')
+                result=bundle.predict_payload(request['dbm'])
+            elif getattr(bundle, 'kind', '').startswith('delta9_'):
+                if 'adc' in request or 'delta_nm' not in request:
+                    raise ValueError('delta9 service requires delta_nm, never ADC')
+                result = bundle.predict_payload(request['delta_nm'])
+            else:
+                if 'delta_nm' in request:
+                    raise ValueError('Legacy model requires 45 ADC, not delta9')
+                result = prediction_payload(bundle, request.get("adc"))
             result.update({
                 "type": "prediction",
                 "request_id": request.get("request_id"),
+                "source_seq": request.get("source_seq"),
+                "timestamp_s": request.get("timestamp_s"),
+                "session_id": request.get("session_id"),
+                "reset_reason": reset_reason,
             })
         except Exception as exc:
+            sequence.invalidate()
             result = {
                 "type": "error",
-                "request_id": request.get("request_id") if "request" in locals() else None,
+                "request_id": request.get("request_id") if isinstance(request, dict) else None,
                 "message": str(exc) or type(exc).__name__,
             }
         print(json.dumps(result, ensure_ascii=False), flush=True)

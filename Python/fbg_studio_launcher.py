@@ -69,6 +69,8 @@ def main(argv=None) -> int:
     timestamp = _datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     print(f"\n[{timestamp}] FBG OptiSense Studio starting; argv={effective_argv!r}")
     try:
+        from qt_runtime import configure_qt
+        configure_qt()
         from fbg_unified_app import main as app_main
 
         return int(app_main(effective_argv) or 0)

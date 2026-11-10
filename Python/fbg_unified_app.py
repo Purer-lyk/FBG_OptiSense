@@ -268,6 +268,9 @@ QToolTip { color: #edf6ff; background-color: #13263c; border: 1px solid #39658c;
 UNIFIED_STYLE = build_hyperos_stylesheet()
 
 
+CAPTURE_PAGE_INDEX = 5
+TRAINING_PAGE_INDEX = 6
+
 PAGE_INFO = (
     (
         "光谱与寻峰",
@@ -294,6 +297,8 @@ PAGE_INFO = (
         "更新电脑客户端，保留机号、标定表和采集记录",
         "device",
     ),
+    ("手动数据采集", "45点9×5真实测量采集 · 单点/多点 · 共享PX6D", "finger"),
+    ("模型训练与部署", "位置/力双独立槽 · 验证选优自动加载 · 显式开始推理", "spectrum"),
 )
 
 
@@ -890,6 +895,22 @@ class UnifiedFbgStudio(QtWidgets.QMainWindow):
             self._open_generated_ota_package
         )
 
+        from manual_stress_capture import ManualStressCaptureWindow
+        from manual_touch_training_page import ManualTouchTrainingPage
+        from paxini_px6d import PaxiniForceSensor
+        # One shared serial owner, idle until the operator explicitly connects.
+        self.touch_force_sensor = PaxiniForceSensor()
+        temporary = self.local_controller.page_temporary_test
+        capture_root = APP_DIR / "outputs" / "manual_touch_45"
+        self.manual_capture = ManualStressCaptureWindow(
+            temporary, wavelength_provider=lambda: [r["measured_nm"] for r in (temporary.plan or {}).get("rows", [])],
+            output_root=capture_root, force_sensor=self.touch_force_sensor, parent=self)
+        self.manual_capture.attach()
+        self.capture_page = self.manual_capture.takeCentralWidget()
+        self.training_page = ManualTouchTrainingPage(
+            default_dataset_dir=APP_DIR / "outputs" / "manual_touch_45", model_search_root=APP_DIR / "outputs",
+            frame_source=temporary, force_provider=self._touch_force_reference,
+            force_sensor=self.touch_force_sensor, capture_window=self.manual_capture, parent=self)
         self._build_shell()
         self._connect_signals()
         self.local_controller.page_peak.thermal_telemetry.connect(
@@ -947,6 +968,11 @@ class UnifiedFbgStudio(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(
             0, lambda: self.switch_source(initial_source, force=True)
         )
+
+    def _touch_force_reference(self):
+        sensor = self.touch_force_sensor
+        sample = sensor.measurement_snapshot()
+        return tuple(sample['corrected'][:3]) if sample else None
 
     def _connect_shared_finger_view(self):
         stress_page = self.local_controller.page_peak
@@ -2494,6 +2520,11 @@ class UnifiedFbgStudio(QtWidgets.QMainWindow):
         if not IN_APP_UPDATES_ENABLED:
             self.workspace_tabs.setTabVisible(3, False)
             self.workspace_tabs.setTabVisible(4, False)
+        for index, page in ((CAPTURE_PAGE_INDEX, self.capture_page), (TRAINING_PAGE_INDEX, self.training_page)):
+            scroll = ResponsiveScrollArea()
+            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+            scroll.setWidget(page)
+            self.workspace_tabs.addTab(scroll, PAGE_INFO[index][0])
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         main_layout.addWidget(self.workspace_tabs, 1)
         root.addWidget(main, 1)
@@ -3697,6 +3728,15 @@ class UnifiedFbgStudio(QtWidgets.QMainWindow):
             event.ignore()
             return
         self._closing = True
+        training = getattr(self, "training_page", None)
+        if training is not None:
+            training.shutdown()
+        capture = getattr(self, "manual_capture", None)
+        if capture is not None:
+            capture.close()
+        sensor = getattr(self, "touch_force_sensor", None)
+        if sensor is not None:
+            sensor.close()
         identity_timer = getattr(self, '_machine_identity_timer', None)
         if identity_timer is not None:
             identity_timer.stop()
@@ -3765,7 +3805,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--view",
-        choices=("spectrum", "finger", "settings", "ota"),
+        choices=("spectrum", "finger", "settings", "ota", "capture", "training"),
         default="spectrum",
         help="启动时显示的主页",
     )
@@ -3792,7 +3832,7 @@ def main(argv=None):
     window._fit_initial_window()
     window.show()
 
-    view_indexes = {"spectrum": 0, "finger": 1, "settings": 2, "ota": 3}
+    view_indexes = {"spectrum": 0, "finger": 1, "settings": 2, "ota": 3, "capture": CAPTURE_PAGE_INDEX, "training": TRAINING_PAGE_INDEX}
     window.workspace_tabs.setCurrentIndex(view_indexes[args.view])
     if args.demo:
         QtCore.QTimer.singleShot(

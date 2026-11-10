@@ -5,18 +5,21 @@ A symmetric Gaussian forces both tails toward one constant baseline and can
 therefore draw artificial platforms when the real FBG peak is asymmetric.
 This module instead uses a modified Akima (Makima) piecewise-cubic interpolant:
 it passes through every physical ADC sample, permits different left/right
-flanks, limits cubic overshoot, and derives the centre from the interpolant's
-local maximum.  No extra wavelength points are acquired or invented as input.
+flanks, and selects the global engineering-dBm maximum on the displayed curve grid.
+The grid is 401 uniform points plus measured wavelengths (no extrapolation);
+this is a grid approximation, with the first wavelength on ties, not a
+derivative-root estimate. Interpolated points are not measured training inputs.
 
-Shape checks are quality warnings rather than destructive gates.  The stored
+No peak-quality score or Gaussian proxy is calculated. The stored
 wavelength axis remains the existing board calibration, not live wavelength-
 meter truth.
 """
 
-from functools import lru_cache
+
 
 import numpy as np
 from scipy.interpolate import Akima1DInterpolator
+from temporary_optical_units import adc_code_to_dbm, transimpedance_ohm
 
 
 FIT_METHOD = 'makima_piecewise_cubic_5point'
@@ -65,81 +68,28 @@ def _half_height_width(curve_x, curve_y, center_nm, baseline_adc, peak_adc):
     return max(0.0, right_nm - left_nm), bool(limited)
 
 
-@lru_cache(maxsize=64)
-def _gaussian_shape_basis(wavelength_key):
-    """Cache only fixed coordinates, never ADC values/centres or quality results."""
-    x = np.asarray(wavelength_key, dtype=float)
-    origin = float(x[len(x) // 2])
-    scale = float(np.median(np.diff(x)))
-    u = (x - origin) / scale
-    centers, widths = np.meshgrid(
-        np.linspace(float(u[0] + 0.25), float(u[-1] - 0.25), 61),
-        np.linspace(0.35, float(u[-1] - u[0]), 32), indexing='ij')
-    gaussian = np.exp(-0.5 * ((u[None, :] - centers.ravel()[:, None])
-                              / widths.ravel()[:, None]) ** 2)
-    mean = gaussian.mean(axis=1)
-    centered = gaussian - mean[:, None]
-    basis = (gaussian, mean, centered,
-             np.maximum(np.sum(centered**2, axis=1), 1e-12),
-             np.maximum(np.sum(gaussian**2, axis=1), 1e-12))
-    for value in basis:
-        value.setflags(write=False)
-    return basis
 
 
-def _gaussian_shape_diagnostics(x, y):
-    """Return legacy residual metrics without controlling centre or rendering.
 
-    An exact cubic interpolant has zero sample residual by construction, so its
-    R² cannot distinguish a clean one-summit peak from five irregular points.
-    Keep the historical bounded Gaussian only as a hidden shape-consistency
-    diagnostic.  The reported centre and displayed curve always come from the
-    Makima cubic; this helper cannot create the former platform artefact.
-    """
-
-    height = float(np.ptp(y))
-    if height <= 1e-12:
-        return 0.0, 0.0
-    gaussian, mean, centered, centered_norm, gaussian_norm = _gaussian_shape_basis(tuple(x))
-    centered_y = y - y.mean()
-    amplitude = (centered @ centered_y) / centered_norm
-    baseline = y.mean() - amplitude * mean
-    negative = baseline < 0.0
-    baseline[negative] = 0.0
-    amplitude[negative] = (
-        np.sum(gaussian[negative] * y, axis=1)
-        / gaussian_norm[negative]
-    )
-    predicted = baseline[:, None] + amplitude[:, None] * gaussian
-    sse = np.sum((predicted - y) ** 2, axis=1)
-    sse[(amplitude < 0.0) | ~np.isfinite(sse)] = np.inf
-    best_sse = float(np.min(sse))
-    if not np.isfinite(best_sse):
-        return 0.0, float('inf')
-    variance = float(np.sum((y - y.mean()) ** 2))
-    r_squared = 0.0 if variance <= 1e-12 else 1.0 - best_sse / variance
-    rmse = float(np.sqrt(best_sse / len(x)))
-    return float(r_squared), rmse
-
-
-def fit_five_points(wavelength_nm, adc):
+def fit_five_points(wavelength_nm, adc, *, feedback_selector=0, adc_channel=1):
     """Compatibility wrapper for saved five-point routes."""
-    return fit_peak_points(wavelength_nm, adc, expected_count=5)
+    return fit_peak_points(wavelength_nm, adc, expected_count=5,
+                           feedback_selector=feedback_selector, adc_channel=adc_channel)
 
 
-def fit_peak_points(wavelength_nm, adc, *, expected_count=None):
+def fit_peak_points(wavelength_nm, adc, *, expected_count=None,
+                    feedback_selector=0, adc_channel=1):
     count = len(wavelength_nm)
     point_label = '五点' if count == 5 else '七点'
     method = f'makima_piecewise_cubic_{count}point'
     def unavailable(reason):
         return dict(
-            valid=False,
+
             fit_available=False,
-            quality_warning=True,
-            quality_issues=[reason],
+
             reason=f'无法拟合：{reason}',
             center_nm=None,
-            r_squared=None,
+
             fit_method=method,
             input_point_count=count,
             optical_accuracy_verified=False,
@@ -154,40 +104,28 @@ def fit_peak_points(wavelength_nm, adc, *, expected_count=None):
     if np.any(y < 0):
         return unavailable('ADC无效')
 
-    issues = []
 
-    def warn(message):
-        if message not in issues:
-            issues.append(message)
 
     order = np.argsort(x, kind='stable')
     if not np.array_equal(order, np.arange(count)):
         x, y = x[order], y[order]
-        warn('波长点顺序已重排')
+
     if np.any(np.diff(x) <= 0):
         return unavailable('波长坐标重复或无效')
 
-    if np.max(y) >= 4080:
-        warn('ADC接近饱和')
     height = float(np.ptp(y))
-    if height < 24:
-        warn('幅值过低，中心不充分约束')
-    apex = int(np.argmax(y))
-    if apex in (0, count - 1):
-        warn('离散峰值位于窗口边缘')
-    tolerance = max(8.0, height * 0.03)
-    rises_to_apex = apex > 0 and not np.any(
-        np.diff(y[:apex + 1]) < -tolerance
-    )
-    falls_after_apex = apex < count - 1 and not np.any(
-        np.diff(y[apex:]) > tolerance
-    )
-    if not (rises_to_apex and falls_after_apex):
-        warn(f'{point_label}未形成清晰的先升后降单峰')
+    # CH2/CH3 have fixed 2 kΩ front ends; CH0/CH1 use the frame selector.
+    channel = int(adc_channel)
+    if channel not in range(4):
+        return unavailable('ADC通道无效')
+    selector = int(feedback_selector) if channel < 2 else 0
+    try:
+        measured_dbm = adc_code_to_dbm(y, selector, floor_nonpositive=True)
+    except ValueError:
+        return unavailable('模拟跨阻档位无效')
+
 
     if height <= 1e-12:
-        center_nm = float(x[count // 2])
-        peak_adc = float(y[count // 2])
         dense_x = np.unique(np.concatenate((
             np.linspace(x[0], x[-1], _RENDER_POINT_COUNT), x
         )))
@@ -200,74 +138,35 @@ def fit_peak_points(wavelength_nm, adc, *, expected_count=None):
             spline = Akima1DInterpolator(
                 x, y, method='makima', extrapolate=False
             )
-            stationary = np.asarray(
-                spline.derivative().roots(extrapolate=False), dtype=float
-            )
-            maxima = [
-                float(value) for value in stationary
-                if (np.isfinite(value) and x[0] <= value <= x[-1]
-                    and float(spline.derivative(2)(value)) < 0.0)
-            ]
-            if maxima:
-                center_nm = max(maxima, key=lambda value: float(spline(value)))
-                if len(maxima) > 1:
-                    warn('三次样条出现多个局部峰')
-            else:
-                center_nm = float(x[apex])
-                warn('三次样条未找到内部极大值，使用离散峰顶')
-
             dense_x = np.unique(np.concatenate((
                 np.linspace(x[0], x[-1], _RENDER_POINT_COUNT), x,
-                np.asarray((center_nm,)),
             )))
             dense_y = np.asarray(spline(dense_x), dtype=float)
             if not np.all(np.isfinite(dense_y)):
                 raise FloatingPointError('Makima输出包含非有限值')
-            peak_adc = float(spline(center_nm))
             baseline_adc = max(0.0, float(min(y[0], y[-1])))
-            fwhm_nm, width_limited = _half_height_width(
-                dense_x, dense_y, center_nm, baseline_adc, peak_adc
-            )
         except (ValueError, FloatingPointError, np.linalg.LinAlgError):
             return unavailable('三次样条计算失败')
+
+    curve_dbm = adc_code_to_dbm(dense_y, selector, floor_nonpositive=True)
+    curve_apex = int(np.argmax(curve_dbm))
+    center_nm = float(dense_x[curve_apex])
+    peak_adc = float(dense_y[curve_apex])
+    if height > 1e-12:
+        fwhm_nm, width_limited = _half_height_width(
+            dense_x, dense_y, center_nm, baseline_adc, peak_adc
+        )
 
     amplitude_adc = max(0.0, peak_adc - baseline_adc)
     effective_sigma_nm = float(
         fwhm_nm / 2.354820045 if fwhm_nm > 0 else 0.0
     )
 
-    # Makima is an exact interpolant, so sample residual is zero by definition.
-    # Use the historical bounded-Gaussian residual only as an independent
-    # shape-consistency score; it never controls the centre or rendered curve.
-    r2, rmse = _gaussian_shape_diagnostics(x, y)
-    if r2 < 0.90:
-        warn(f'{point_label}峰形一致性偏低({r2:.3f})')
-    if height <= 1e-12 or rmse / max(height, 1e-12) > 0.15:
-        warn(f'{point_label}峰形残差相对幅值偏大')
-    # The five points may intentionally stop slightly above the half-height
-    # crossing.  This limits the reported effective width but does not make the
-    # spline centre invalid; expose it as metadata instead of rejecting an
-    # otherwise clean five-point peak.
-    if center_nm <= x[0] or center_nm >= x[-1]:
-        warn('拟合中心贴近采样窗口边界')
-    if 0 < apex < count - 1 and not x[apex - 1] <= center_nm <= x[apex + 1]:
-        warn('拟合中心与离散峰顶不一致')
-    overshoot = max(0.0, peak_adc - float(np.max(y)))
-    if height > 0 and overshoot > 0.15 * height:
-        warn('三次样条峰顶过冲')
-    if height > 0 and float(np.min(dense_y)) < -0.05 * height:
-        warn('三次样条边缘下冲')
-
-    valid = not issues
-    reason = (
-        f'质量通过·Makima三次样条·{point_label}估计·精度未验证'
-        if valid else '⚠ 可能有问题：' + '；'.join(issues)
-    )
+    reason = f'{point_label}Makima曲线全局最大dBm·网格近似·精度未验证'
     return dict(
-        valid=valid,
+
         fit_available=True,
-        quality_warning=not valid,
-        quality_issues=list(issues),
+
         reason=reason,
         center_nm=float(center_nm),
         sigma_nm=effective_sigma_nm,
@@ -277,9 +176,20 @@ def fit_peak_points(wavelength_nm, adc, *, expected_count=None):
         baseline_adc=float(baseline_adc),
         amplitude_adc=float(amplitude_adc),
         peak_adc=float(peak_adc),
-        r_squared=r2,
-        rmse_adc=rmse,
-        quality_metric='bounded_gaussian_residual_diagnostic_only',
+        peak_dbm=float(curve_dbm[curve_apex]),
+        peak_selection_method='makima_curve_global_max_dbm',
+        peak_source='interpolated',
+        peak_curve_index=curve_apex,
+        peak_grid_uniform_point_count=_RENDER_POINT_COUNT,
+        peak_grid_step_nm=float((x[-1] - x[0]) / (_RENDER_POINT_COUNT - 1)),
+        peak_grid_point_count=len(dense_x),
+        peak_grid_approximation=True,
+        peak_tie_rule='first_in_wavelength_order',
+        feedback_selector=selector,
+        adc_channel=channel,
+        transimpedance_ohm=float(transimpedance_ohm(selector)),
+        dbm_is_engineering_estimate=True,
+
         curve_x_nm=dense_x.tolist(),
         curve_adc=dense_y.tolist(),
         fit_method=method,
@@ -288,20 +198,17 @@ def fit_peak_points(wavelength_nm, adc, *, expected_count=None):
     )
 
 
-def fit_temporary_frame(rows, values, warmed_up=True):
+def fit_temporary_frame(rows, values, warmed_up=True, *,
+                        feedback_selector=0, adc_channel=1):
     from temporary_test_mode import points_per_peak_for_rows
     count = points_per_peak_for_rows(rows)
     if (len(rows) != len(values) or len(rows) not in range(count, 9 * count + 1, count)):
         raise ValueError('实时拟合需要1～9个完整五点或七点峰')
-    peak_count = len(rows) // count
-    if not warmed_up:
-        return [dict(valid=False, fit_available=False, quality_warning=True,
-                     reason='预热中', center_nm=None, r_squared=None,
-                     fit_method=f'makima_piecewise_cubic_{count}point', input_point_count=count)
-                for _ in range(peak_count)]
+    # warmed_up is retained only for old callers; it is not a peak-quality gate.
     return [fit_peak_points(
                 [r['measured_nm'] for r in rows[i:i + count]],
                 values[i:i + count],
+                feedback_selector=feedback_selector, adc_channel=adc_channel,
             )
             for i in range(0, len(rows), count)]
 

@@ -60,7 +60,7 @@ class UnifiedStudioTests(unittest.TestCase):
         self._ota_tempdir.cleanup()
 
     def test_all_operator_pages_are_embedded_in_one_window(self):
-        self.assertEqual(self.window.workspace_tabs.count(), 5)
+        self.assertEqual(self.window.workspace_tabs.count(), 7)
         self.assertIs(
             self.window.local_controller.page_peak.finger_3d_window,
             self.window.finger_controller,
@@ -1317,7 +1317,7 @@ class UnifiedStudioTests(unittest.TestCase):
         self.assertIn("演示模式不会控制机床", finger.click_press_status_label.text())
 
     def test_hyperos_settings_navigation_tracks_the_embedded_pages(self):
-        self.assertEqual(len(self.window.nav_buttons), 5)
+        self.assertEqual(len(self.window.nav_buttons), 7)
         self.assertTrue(self.window.workspace_tabs.tabBar().isHidden())
         self.window.workspace_tabs.setCurrentIndex(2)
         self.app.processEvents()

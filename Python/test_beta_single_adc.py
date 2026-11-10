@@ -125,7 +125,7 @@ class ProtocolTests(unittest.TestCase):
              patch('benchmark_stress_realtime._close_shutter',return_value=True), \
              patch('temporary_test_mode.time.time_ns',return_value=123):
             report=t.execute_device(port,plan,Path(folder)/'capture.json',cycles=32,
-                                    first_delay_us=850,point_delays_us=[850]*63,
+                                    first_delay_us=850,point_delays_us=[850]*len(plan['rows']),
                                     single_sample=True,fast_dac_writes=True)
         self.assertTrue(report['complete']); self.assertTrue(report['shutter_ack'])
         self.assertEqual(report['spacing_us'],0); self.assertEqual(len(report['frames']),32)

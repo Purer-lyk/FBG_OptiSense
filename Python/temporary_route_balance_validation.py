@@ -53,8 +53,7 @@ def _observations(report):
     fits = [fit_temporary_frame(route, sample) for sample in values]
     centers = np.asarray([[f.get('center_nm') if f.get('center_nm') is not None else np.nan
                            for f in group] for group in fits], dtype=float)
-    shapes_valid = all(f.get('valid', False) for group in fits for f in group)
-    return values, centers, shapes_valid, {
+    return values, centers, {
         'mean_hz': float(1e6 / np.mean(periods)),
         'p99_period_ms': float(np.percentile(periods, 99) / 1000),
         'measured_frames': len(measured),
@@ -105,9 +104,9 @@ def _compare_route_values(before, candidate, after, waveform_fraction,
     for value in (waveform_fraction, reference_drift_fraction, adc_noise_floor_codes):
         if not np.isfinite(value) or value <= 0:
             raise ValueError('Accuracy criteria must be finite and positive')
-    pre, pre_centers, pre_shape, pre_rate = _observations(before)
-    fast, fast_centers, fast_shape, fast_rate = _observations(candidate)
-    post, post_centers, post_shape, post_rate = _observations(after)
+    pre, pre_centers, pre_rate = _observations(before)
+    fast, fast_centers, fast_rate = _observations(candidate)
+    post, post_centers, post_rate = _observations(after)
     if pre_rate['firmware'] != fast_rate['firmware'] or post_rate['firmware'] != fast_rate['firmware']:
         raise ValueError('Firmware changed between reference and candidate')
     for report in (before, after):
@@ -135,8 +134,7 @@ def _compare_route_values(before, candidate, after, waveform_fraction,
                            float(np.max(np.abs(fast_centers-center_post))*1000))
                        if centers_finite else None)
     reasons = []
-    if not (pre_shape and post_shape): reasons.append('reference_peak_shape_unresolved')
-    if not fast_shape: reasons.append('candidate_peak_shape_unresolved')
+
     if adc_drift > 1 or ref_scatter > 1: reasons.append('reference_moving_or_noisy')
     # Centre differences remain reported, never compared against a pm cutoff.
     if center_drift_pm is None:

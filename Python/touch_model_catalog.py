@@ -23,6 +23,12 @@ def find_latest_touch_model(output_root):
 
 def model_description(report):
     kind=report.get('architecture')
+    if report.get('schema') in ('fbg_touch_temporal26_v1', 'fbg_touch_separate26_v1'):
+        config=report.get('config') or report.get('configuration') or {}
+        title={'tcn':'TCN','sensor_token':'Sensor Token','sparse_cnn':'稀疏CNN','inception_1d':'Inception 1D'}.get(kind,str(kind))
+        force_mode='历史反馈仅用于力回归' if config.get('force_history') else '力回归仅当前帧'
+        return f'{title}：输入B×9×5实测dBm；位置仅当前45点，26类（0空载 / 1～25按压）；位置/力独立骨干、优化与选模。{force_mode}；实时ADC按模型跨阻档位转换，缺失参考力不补零。'
+
     if kind=='sensor_token_dbm':
         config=report.get('configuration') or {}
         layers=config.get('layers','?'); heads=config.get('heads','?')

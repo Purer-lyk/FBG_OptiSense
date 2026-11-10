@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from touch_worker_runtime import torch_worker_python
 import unittest
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from pathlib import Path
 class SparseTouchCnnProcessTests(unittest.TestCase):
     def test_sparse_cnn_core_in_clean_process(self):
         result = subprocess.run(
-            [sys.executable, "manual_touch_cnn_subprocess_tests.py"],
+            [torch_worker_python(), "manual_touch_cnn_subprocess_tests.py"],
             cwd=Path(__file__).resolve().parent,
             text=True,
             capture_output=True,

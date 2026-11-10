@@ -1,0 +1,60 @@
+{
+  "commit": "4e938a1767106324dd753b2a44832bf870a0252e",
+  "files": {
+    "models/iTransformer.py": {
+      "original_sha256": "6de6b88dc0bfcaa36599c12626d611205acca7aa4d572f8da5a769ef7afee232",
+      "vendor_sha256": "6859d6e33dac0f079aea7936a4ce6e180c3a4f0e712b4a1de8315f92ecf94afd",
+      "modification": "namespace imports only"
+    },
+    "models/TimeMixer.py": {
+      "original_sha256": "28352d1e7e8f1e7d67545cd5da5da34ab816310175c67502f5b8a2629a66bdbf",
+      "vendor_sha256": "0a396d70ca2c1f9f723690b1a53ee57d829964ea54dac41dac88c2ad8ec2d198",
+      "modification": "namespace imports only"
+    },
+    "models/TSMixer.py": {
+      "original_sha256": "0efbce31f764ffbdab7efe84b9332fb021e461ae774a8bbf9137521ae7c3e594",
+      "vendor_sha256": "0efbce31f764ffbdab7efe84b9332fb021e461ae774a8bbf9137521ae7c3e594",
+      "modification": "namespace imports only"
+    },
+    "models/PatchTST.py": {
+      "original_sha256": "e677cd698a9a14f036fbbecc3395146a6407a04ab790d52d433f44e3402e0616",
+      "vendor_sha256": "7d93abd38cffb8525980a34523dc0f3521ea0225edce28c1fbf4ef28379b99cd",
+      "modification": "namespace imports only"
+    },
+    "layers/Transformer_EncDec.py": {
+      "original_sha256": "031b26a6ed774442bfb4cf316d4a605f7642cd652a4c2b82f5e3d1fcdc47b098",
+      "vendor_sha256": "031b26a6ed774442bfb4cf316d4a605f7642cd652a4c2b82f5e3d1fcdc47b098",
+      "modification": "namespace imports only"
+    },
+    "layers/SelfAttention_Family.py": {
+      "original_sha256": "0fea961b640b1a7db471df2e389abfb843ce8e5767aca5af141ee22dd43be66f",
+      "vendor_sha256": "a3c5774e028e97e800fafebdf70a939fa3162365695adc07a5bbd5d5ec5064f9",
+      "modification": "namespace imports only"
+    },
+    "layers/Embed.py": {
+      "original_sha256": "0a29593e3796b5a3798bd3d37c1150fc2256c559abdee36e83eecd1a05787247",
+      "vendor_sha256": "0a29593e3796b5a3798bd3d37c1150fc2256c559abdee36e83eecd1a05787247",
+      "modification": "namespace imports only"
+    },
+    "layers/Autoformer_EncDec.py": {
+      "original_sha256": "f69c563c6f7a59ed77769fa26380b583fe63e17a8deb5ee6573a923cccc7d8e7",
+      "vendor_sha256": "f69c563c6f7a59ed77769fa26380b583fe63e17a8deb5ee6573a923cccc7d8e7",
+      "modification": "namespace imports only"
+    },
+    "layers/AutoCorrelation.py": {
+      "original_sha256": "80b158d71031505c1e646e1419be5508d14410b8a4f64795b0e784bcdbd24ce6",
+      "vendor_sha256": "80b158d71031505c1e646e1419be5508d14410b8a4f64795b0e784bcdbd24ce6",
+      "modification": "namespace imports only"
+    },
+    "layers/StandardNorm.py": {
+      "original_sha256": "42c0d7f8019d899e1dac23ffc81fd2e08763f7d824142a3e29842fc3847c5e15",
+      "vendor_sha256": "42c0d7f8019d899e1dac23ffc81fd2e08763f7d824142a3e29842fc3847c5e15",
+      "modification": "namespace imports only"
+    },
+    "utils/masking.py": {
+      "original_sha256": "c22de70ad076f4eeecc857aba984741da05da54375333399ff2742b041544986",
+      "vendor_sha256": "c22de70ad076f4eeecc857aba984741da05da54375333399ff2742b041544986",
+      "modification": "namespace imports only"
+    }
+  }
+}

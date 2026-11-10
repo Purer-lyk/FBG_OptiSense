@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from touch_worker_runtime import torch_worker_python
 import unittest
 
 class DbmTrainingIsolatedTests(unittest.TestCase):
@@ -11,7 +12,7 @@ class DbmTrainingIsolatedTests(unittest.TestCase):
         env=dict(os.environ,PYTHONIOENCODING='utf-8')
         scratch=r'C:\Users\Administrator\AppData\Local\hermes\cache\scratch'
         env.update(TEMP=scratch,TMP=scratch,TMPDIR=scratch)
-        result=subprocess.run([sys.executable,str(root/'dbm_training_subprocess_tests.py')],cwd=root,env=env,capture_output=True,text=True,encoding='utf-8',timeout=60)
+        result=subprocess.run([torch_worker_python(),str(root/'dbm_training_subprocess_tests.py')],cwd=root,env=env,capture_output=True,text=True,encoding='utf-8',timeout=60)
         self.assertEqual(result.returncode,0,result.stdout+'\n'+result.stderr)
         self.assertIn('Ran 4 tests',result.stderr)
 

@@ -2,6 +2,11 @@
 *.htm
 JDSU/MDK-ARM/JDSU/*
 JDSU/MDK-ARM/RTE/*
+# These two files are build inputs, not compiler output.
+!JDSU/MDK-ARM/JDSU/JDSU.sct
+!JDSU/MDK-ARM/RTE/_JDSU/
+JDSU/MDK-ARM/RTE/_JDSU/*
+!JDSU/MDK-ARM/RTE/_JDSU/RTE_Components.h
 *.xiechengxin
 *.yk
 *.uvoptx
@@ -27,6 +32,19 @@ JDSU/MDK-ARM/RTE/*
 /Python/app/
 /Python/app_*_build/
 /Python/outputs/
+# Approved machine-one 45-point captures; keep all other runtime output local.
+!/Python/outputs/
+/Python/outputs/*
+!/Python/outputs/machines/
+/Python/outputs/machines/*
+!/Python/outputs/machines/machine_1/
+/Python/outputs/machines/machine_1/*
+!/Python/outputs/machines/machine_1/temporary_test/
+/Python/outputs/machines/machine_1/temporary_test/*
+!/Python/outputs/machines/machine_1/temporary_test/finger_captures/
+/Python/outputs/machines/machine_1/temporary_test/finger_captures/*
+!/Python/outputs/machines/machine_1/temporary_test/finger_captures/1号_2026_10_13_1_50.json
+!/Python/outputs/machines/machine_1/temporary_test/finger_captures/1号_2026_11_10_28oC.json.json
 /Python/beta_data/
 /JDSU/MDK-ARM/JDSU_beta_generated.uvprojx
 /outputs/
@@ -37,16 +55,67 @@ JDSU/MDK-ARM/RTE/*
 *.partial
 *.incomplete
 
-# Only the editable legacy/reference backups are source-controlled.
-/backups/*
-!/backups/hidden_features_20261009_d8e7f706/
-!/backups/reference45_before_10ms_20261010/
+# Local source snapshots and experiment evidence are not runtime dependencies.
+/backups/
+/migration_evidence/
+/Python/migration_evidence/
+/results/
 **/*_PRIVATE/
 
 # Credentials stay local. Public verification keys and .example files are source.
 .env
 .env.*
+!.env.example
+!.env.*.example
 *.key
 *.pem
 /Python/fbg_remote_config*.yaml
 /Python/fbg_remote_config*.yml
+
+# Additional local environments, tool caches and editor state.
+**/venv/
+**/.mypy_cache/
+**/.tox/
+**/.nox/
+**/.ipynb_checkpoints/
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*.uvguix.*
+/JDSU/MDK-ARM/DebugConfig/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+
+# Training weights, array caches and packaged experiment/delivery output.
+# Keep source, tests/fixtures, dependency manifests, assets, calibrated runtime
+# resources, vendor code/licenses and curated firmware. Do not blanket-ignore
+# JSON/CSV/YAML/DLL/LIB/HEX: this project uses those as runtime/build inputs.
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.npz
+*.npy
+*.joblib
+*.pkl
+*.pickle
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.whl
+~$*
+
+# Legacy packaging specs explicitly require these curated firmware inputs.
+# Keep only these files available under the otherwise ignored output tree.
+!/outputs/
+/outputs/*
+!/outputs/ota/
+/outputs/ota/*
+!/outputs/ota/JDSU_F205RE_v1.0.106.fbgfw
+!/outputs/ota/JDSU_F205RE_v1.0.109_thermal_candidate.fbgfw
+!/outputs/ota/JDSU_F205RE_v1.0.87.fbgfw
+!/outputs/ota/JDSU_OTA_FirstInstall_v1.0.87.hex

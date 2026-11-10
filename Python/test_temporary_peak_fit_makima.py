@@ -23,6 +23,27 @@ class MakimaDisplayTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(y, original)
 
+    def test_peak_is_global_dbm_max_on_rendered_makima_curve(self):
+        from temporary_optical_units import adc_code_to_dbm
+        x = np.array([1534.6, 1534.8, 1535.0, 1535.2, 1535.4])
+        y = np.array([45., 250., 720., 500., 130.])
+        fit = fit_makima(x, y)
+        powers = adc_code_to_dbm(fit['curve_adc'], 0, floor_nonpositive=True)
+        index = int(np.argmax(powers))
+        self.assertGreater(max(fit['curve_adc']), max(y))
+        self.assertNotEqual(fit['curve_x_nm'][index], x[2])
+        self.assertEqual(fit['center_nm'], fit['curve_x_nm'][index])
+        self.assertEqual(fit['peak_adc'], fit['curve_adc'][index])
+        self.assertEqual(fit['peak_dbm'], powers[index])
+
+    def test_flat_max_uses_first_real_point(self):
+        x = [1534.6, 1534.8, 1535.0, 1535.2, 1535.4]
+        fit = fit_makima(x, [123.] * 5)
+        self.assertEqual(fit['center_nm'], x[0])
+        self.assertEqual(fit['peak_adc'], 123.)
+        self.assertNotIn('quality_warning', fit)
+        self.assertTrue(fit['fit_available'])
+
     def test_default_gaussian_remains_separate_and_more_accurate_on_gaussian(self):
         x = 1535.0 + np.linspace(-0.6, 0.6, 5)
         actual_center = 1534.78

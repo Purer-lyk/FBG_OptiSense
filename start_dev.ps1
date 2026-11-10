@@ -7,6 +7,6 @@ $python = Join-Path $bundleRoot "Python\.venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
     throw "尚未创建开发环境，请先运行 .\setup_dev.ps1"
 }
-$env:QT_OPENGL = "software"
+$env:QT_OPENGL = "desktop"
 & $python (Join-Path $bundleRoot "Python\fbg_studio_launcher.py") --source local
 

@@ -253,7 +253,7 @@ def acquire_reference(device, output, *, on_progress=lambda n, total: None,
             raise ValueError('Dense indices must be 5～2001 unique increasing table indices')
         points = [points[i] for i in dense_indices]
     if indices is not None:
-        if (len(indices) not in (set(range(5, 46, 5)) | set(range(7, 64, 7)))
+        if (len(indices) not in set(range(5, 46, 5))
                 or any(type(i) is not int or not 0 <= i <= 2000 for i in indices)
                 or len(set(indices)) != len(indices)):
             raise ValueError('Selected reference requires 5～45 unique physical indices in five-point groups')

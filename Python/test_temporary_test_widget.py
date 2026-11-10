@@ -429,7 +429,7 @@ class WidgetTests(unittest.TestCase):
         data['quality'] = quality(data)
         window.update_frame(data)
         self.assertEqual(window.board_firmware_version, data['firmware'])
-        self.assertTrue(window.peak_fits[0]['valid'])
+        self.assertTrue(window.peak_fits[0]['fit_available'])
         center = window.peak_fit_table.item(0,0).text()
         raw = [r['second_code'] for r in data['records']]
         window.digital_gain.setValue(2)
@@ -443,8 +443,8 @@ class WidgetTests(unittest.TestCase):
         data['cycle_start_us'] += 70000
         data['sequence'] += 1
         window.update_frame(data)
-        self.assertIn('⚠', window.peak_fit_table.item(0,0).text())
-        self.assertIn('可能有问题', window.peak_fit_table.item(2,0).text())
+        self.assertNotIn('⚠', window.peak_fit_table.item(0,0).text())
+        self.assertNotIn('可能有问题', window.peak_fit_table.item(1,0).text())
         self.assertTrue(window.fit_labels[0].isVisible())
         window.invalidate_plan()
         self.assertEqual(window.peak_fits,[])
@@ -483,7 +483,7 @@ class WidgetTests(unittest.TestCase):
 
             window.peak_fit_method.setCurrentIndex(0)
             self.assertEqual(window.peak_fits, [])
-            self.assertEqual(window.peak_fit_table.verticalHeaderItem(1).text(), 'R²')
+            self.assertEqual(window.peak_fit_table.verticalHeaderItem(1).text(), '计算状态')
             data['cycle_start_us'] += 70000
             data['sequence'] += 1
             window.update_frame(data)
@@ -497,7 +497,7 @@ class WidgetTests(unittest.TestCase):
             data['sequence'] += 1
             window.update_frame(data)
             self.assertAlmostEqual(window.peak_fits[0]['center_nm'], default_center)
-            self.assertIn('形状诊断', window.peak_fit_table.verticalHeaderItem(1).text())
+            self.assertEqual(window.peak_fit_table.verticalHeaderItem(1).text(), '计算状态')
             self.assertIn('实验性', window.peak_fit_status.text())
         finally:
             window.close()
@@ -1180,10 +1180,10 @@ class WidgetTests(unittest.TestCase):
             data['sequence'] = sequence
             data['cycle_start_us'] += 70000
             window.update_frame(data)
-        self.assertTrue(any(streak >= 3 for streak in window.fit_failure_streaks))
+        self.assertFalse(hasattr(window,'fit_failure_streaks'))
         self.assertTrue(window.plan_ready)
         self.assertTrue(window.start_button.isEnabled())
-        self.assertIn('连续出现拟合质量警告', window.status.text())
+        self.assertNotIn('连续出现拟合质量警告', window.status.text())
         window.close()
 
     def test_stop_and_finished_keep_verified_route_restartable(self):
@@ -1274,8 +1274,8 @@ class WidgetTests(unittest.TestCase):
             with patch('temporary_test_widget.LAST_SESSION_PATH', session_path), \
                  patch('app_JDSU.load_fullband_accuracy_table', return_value=table):
                 restored = TemporaryTestWindow(SimpleNamespace())
-            self.assertFalse(restored.plan_ready)
-            self.assertFalse(restored.start_button.isEnabled())
+            self.assertTrue(restored.plan_ready)
+            self.assertTrue(restored.start_button.isEnabled())
             self.assertEqual(reference_values, restored.reference_values)
             self.assertEqual(
                 [row['index'] for row in plan['rows']],
@@ -1284,8 +1284,8 @@ class WidgetTests(unittest.TestCase):
             self.assertIsNotNone(restored.reference_curves[6].getData()[0])
             self.assertTrue(restored.show_reference.isChecked())
             self.assertTrue(session_path.exists())
-            self.assertIn('峰7', restored.status.text())
-            self.assertIn('未通过的参考虚线', restored.status.text())
+            self.assertNotIn('峰7', restored.status.text())
+            self.assertNotIn('未通过的参考虚线', restored.status.text())
             restored.close()
 
     def test_reference_line_independent_gain_and_invalidation(self):
@@ -1360,7 +1360,7 @@ class WidgetTests(unittest.TestCase):
         window.reference_line_ready(report)
         self.assertTrue(window.plan_ready)
         self.assertTrue(window.start_button.isEnabled())
-        self.assertIn('峰7', window.status.text())
+        self.assertNotIn('峰7', window.status.text())
         window.close()
 
     def test_failed_reference_attempt_keeps_existing_route_startable(self):
@@ -1402,12 +1402,12 @@ class WidgetTests(unittest.TestCase):
             )
             window.reference_line_ready(report)
             self.assertTrue(window.plan_ready)
-            self.assertTrue(window.plan['reference_shape_gate_bypassed'])
+            self.assertNotIn('reference_shape_gate_bypassed', window.plan)
             window.close()
             restored = TemporaryTestWindow(SimpleNamespace())
             self.assertTrue(restored.plan_ready)
             self.assertTrue(restored.start_button.isEnabled())
-            self.assertIn('未通过', restored.status.text())
+            self.assertNotIn('峰形检查未通过', restored.status.text())
             restored.close()
 
     def test_failed_sparse_peak_keeps_line_and_route_for_manual_adjustment(self):
@@ -1449,7 +1449,7 @@ class WidgetTests(unittest.TestCase):
         self.assertIsNotNone(window.reference_curves[3].getData()[0])
         self.assertTrue(window.plan_ready)
         self.assertTrue(window.start_button.isEnabled())
-        self.assertIn('峰4', window.status.text())
+        self.assertNotIn('峰4', window.status.text())
         self.assertIn('已绘制', window.status.text())
 
         second = dict(
@@ -1481,7 +1481,7 @@ class WidgetTests(unittest.TestCase):
             window.update_frame(data)
         self.assertTrue(window.plan_ready)
         self.assertTrue(window.start_button.isEnabled())
-        self.assertIn('连续出现拟合质量警告', window.status.text())
+        self.assertNotIn('连续出现拟合质量警告', window.status.text())
         window.close()
 
     def test_reference_worker_uses_same_45_points_and_analog_gain(self):

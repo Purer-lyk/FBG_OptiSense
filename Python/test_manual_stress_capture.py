@@ -137,7 +137,7 @@ class FixedGridCaptureTests(unittest.TestCase):
                 )
                 self.assertIs(window.zero_button, window.force_vector.zero_button)
                 self.assertIs(window.zero_button.parentWidget(), window.force_vector)
-                self.assertEqual(window.zero_button.text(), "标定归零")
+                self.assertEqual(window.zero_button.text(), "采集力归零")
                 self.assertFalse(hasattr(window.surface_map, "force_arrows"))
             finally:
                 window.close()
@@ -189,9 +189,8 @@ class FixedGridCaptureTests(unittest.TestCase):
         surface = FingerSurfaceMap(on_selected=selected.append)
         try:
             self.assertEqual(len(surface.buttons), 25)
-            self.assertEqual(len(surface.text_items), 25)
-            self.assertEqual([item.text for item in surface.text_items],
-                             [str(index) for index in range(1, 26)])
+            self.assertEqual(surface.text_items, [])
+            self.assertEqual(surface.number_labels, [])
             surface.buttons[12].click()
             self.assertEqual(selected, [13])
         finally:
@@ -212,6 +211,7 @@ class FixedGridCaptureTests(unittest.TestCase):
         self.assertEqual(len(views["makima_peak_fits"]), 9)
         first_fit = views["makima_peak_fits"][0]
         self.assertEqual(first_fit["fit_method"], "makima_piecewise_cubic_5point")
+        self.assertEqual(first_fit["peak_selection_method"], "makima_curve_global_max_dbm")
         self.assertEqual(len(first_fit["input_adc"]), 5)
         self.assertNotIn("input_first_adc", first_fit)
         self.assertGreater(len(first_fit["curve_x_nm"]), 5)
@@ -273,6 +273,46 @@ class FixedGridCaptureTests(unittest.TestCase):
                 self.assertIsNone(quality['grid_row'])
                 self.assertIsNone(quality['paxini_force'])
                 self.assertEqual(len(quality['stable_adc']), 45)
+            finally:
+                window.close()
+
+    def test_compact_display_keeps_all_saved_class_coordinates(self):
+        canonical = tuple((r * 5 + c + 1, x, y)
+            for r, y in enumerate((.16, .255, .35, .445, .54))
+            for c, x in enumerate((.30, .40, .50, .60, .70)))
+        self.assertEqual(FINGER_POINT_LAYOUT, canonical)
+        with tempfile.TemporaryDirectory() as folder:
+            page = FakeTemporaryPage()
+            window = ManualStressCaptureWindow(page,
+                wavelength_provider=lambda: list(page.reference_wavelengths),
+                output_root=Path(folder))
+            window._read_force_sample = lambda: None
+            try:
+                for label, _x, _y in canonical:
+                    window.select_grid_point(label)
+                    window._on_temporary_frame(temporary_frame(sequence=label))
+                    self.assertTrue(window.capture_current_press())
+                window.no_press_button.click()
+                window._on_temporary_frame(temporary_frame(sequence=26))
+                self.assertTrue(window.capture_current_press())
+                session_dir = window.session_dir
+                window.close_session()
+                frames = [json.loads(line) for line in
+                    (session_dir / 'frames.jsonl').read_text(encoding='utf-8').splitlines()]
+                self.assertEqual(len(frames), 26)
+                for (label, x, y), frame in zip(canonical, frames):
+                    quality = frame['quality']
+                    self.assertEqual(quality['press_label'], label)
+                    self.assertEqual(quality['surface_x_normalized'], x)
+                    self.assertEqual(quality['surface_y_normalized'], y)
+                    self.assertEqual(quality['grid_row'], (label - 1) // 5 + 1)
+                    self.assertEqual(quality['grid_column'], (label - 1) % 5 + 1)
+                empty = frames[-1]['quality']
+                self.assertEqual(empty['press_label'], 0)
+                self.assertEqual(empty['press_state'], 'no_press')
+                self.assertFalse(empty['is_pressed'])
+                self.assertIsNone(empty['surface_x_normalized'])
+                self.assertIsNone(empty['surface_y_normalized'])
             finally:
                 window.close()
 
@@ -344,6 +384,16 @@ class FixedGridCaptureTests(unittest.TestCase):
         self.assertIn("curve_adc", views["makima_peak_fits"][0])
         self.assertIn("curve_voltage_v", views["makima_peak_fits"][0])
         self.assertIn("curve_dbm", views["makima_peak_fits"][0])
+        # Read back the production JSONL writer, not just an in-memory fit.
+        for i, fit in enumerate(views["makima_peak_fits"]):
+            codes = fit["curve_adc"]
+            powers = fit["curve_dbm"]
+            apex = max(range(len(powers)), key=lambda j: powers[j])
+            self.assertEqual(fit["center_nm"], fit["curve_x_nm"][apex])
+            self.assertEqual(fit["peak_dbm"], powers[apex])
+            self.assertEqual(fit["peak_adc"], codes[apex])
+            self.assertEqual(fit["peak_selection_method"], "makima_curve_global_max_dbm")
+            self.assertEqual(frame["quality"]["peak_fits"][i], fit)
         # The Paxini PX6D six-axis force read at the capture instant.
         force = frame["quality"]["paxini_force"]
         self.assertIsNotNone(force)

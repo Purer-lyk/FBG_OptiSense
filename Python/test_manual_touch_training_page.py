@@ -37,7 +37,7 @@ class ManualTouchTrainingPageTests(unittest.TestCase):
         self.assertIn('1层',description)
         self.assertIn('ADC',description)
 
-    def test_latest_token_model_autoloads_and_displays_test_metrics(self):
+    def test_default_stays_disabled_until_explicit_load_then_displays_test_metrics(self):
         import json
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)
@@ -50,6 +50,9 @@ class ManualTouchTrainingPageTests(unittest.TestCase):
             (run/'comparison.json').write_text(json.dumps({'selected_models':{'sensor_token':{'model_path':str(model)}}}),encoding='utf-8')
             page=ManualTouchTrainingPage(default_dataset_dir=root/'manual_touch_sequences',model_search_root=root)
             try:
+                self.assertIsNone(page.model_path)
+                self.assertFalse(page.start_live_button.isEnabled())
+                self.assertTrue(page.load_model(model))
                 self.assertEqual(page.model_path,model.resolve())
                 self.assertEqual(page.live_model_edit.text(),str(model.resolve()))
                 self.assertTrue(page.start_live_button.isEnabled())
@@ -79,11 +82,11 @@ class ManualTouchTrainingPageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             page = ManualTouchTrainingPage(default_dataset_dir=Path(folder))
             try:
-                self.assertIn("4×3", page.input_shape_label.text())
-                self.assertIn("Mask", page.input_shape_label.text())
+                self.assertIn("45点9×5", page.input_shape_label.text())
+                self.assertIn("独立骨干", page.input_shape_label.text())
                 self.assertEqual(page.performance_table.rowCount(), 25)
-                self.assertEqual(page.actual_force.title, "真实平均三维力")
-                self.assertEqual(page.predicted_force.title, "CNN预测三维力")
+                self.assertEqual(page.actual_force.title, "PX6D实测力")
+                self.assertEqual(page.predicted_force.title, "预测整体三维力")
                 self.assertFalse(page.cancel_button.isEnabled())
             finally:
                 page.close()
@@ -130,9 +133,10 @@ class ManualTouchTrainingPageTests(unittest.TestCase):
                 page.select_result_point(17)
                 self.assertIn("80.00%", page.overall_metrics_label.text())
                 self.assertIn("开发评估", page.validation_warning_label.text())
-                self.assertAlmostEqual(page.actual_force.force_xyz[0], 1.7)
-                self.assertAlmostEqual(page.actual_force.force_xyz[1], -0.2)
-                self.assertAlmostEqual(page.actual_force.force_xyz[2], -5.1)
+                # Validation averages must never impersonate a connected live sensor.
+                self.assertFalse(page.actual_force.connected)
+                self.assertIsNone(page.actual_force.moments)
+                self.assertEqual(page.performance_table.item(16, 3).text(), "+1.700 N")
                 self.assertAlmostEqual(page.predicted_force.force_xyz[0], 1.75)
                 self.assertAlmostEqual(page.predicted_force.force_xyz[1], -0.1)
                 self.assertAlmostEqual(page.predicted_force.force_xyz[2], -5.0)
@@ -195,7 +199,7 @@ class ManualTouchTrainingPageTests(unittest.TestCase):
             page = ManualTouchTrainingPage(default_dataset_dir=Path(folder))
             try:
                 self.assertTrue(page.force_curves.isHidden())
-                self.assertTrue(page.actual_force.isHidden())
+                self.assertFalse(page.actual_force.isHidden())
                 self.assertTrue(page.predicted_force.isHidden())
                 self.assertTrue(page.performance_table.isHidden())
                 self.assertFalse(page.live_curves.isHidden())
@@ -218,8 +222,8 @@ class ManualTouchTrainingPageTests(unittest.TestCase):
     def test_unified_navigation_defines_training_as_fifth_page(self):
         from fbg_unified_app import PAGE_INFO, parse_args
 
-        self.assertEqual(len(PAGE_INFO), 5)
-        self.assertEqual(PAGE_INFO[4][0], "模型训练与评估")
+        self.assertEqual(len(PAGE_INFO), 7)
+        self.assertEqual(PAGE_INFO[6][0], "模型训练与部署")
         self.assertEqual(parse_args(["--view", "training"]).view, "training")
 
     def test_realtime_deployment_controls_and_45_point_frame_contract(self):

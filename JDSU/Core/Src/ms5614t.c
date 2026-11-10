@@ -1882,8 +1882,7 @@ static void runFastFlankStream(void)
 		static CandidateRoute candidateRoute;
 		static const uint8_t candidateLocalRows[TEMPORARY_ROUTE_MAX_COUNT] = {
 				0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,
-				27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,
-				45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62
+				27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44
 		};
 		const uint8_t *streamRows = fullMapStream ? fastFullMapRows
 				: (customStream ? candidateLocalRows : (tripletStream ? fastTripletRows : routeTestRows[1]));
@@ -1932,8 +1931,8 @@ static void runFastFlankStream(void)
 		if(!dma_transfer_complete) reject |= 4U;
 		uint8_t temporaryCountValid = route == 3U
 				? aRxBuffer[5] == TEMPORARY_ROUTE_COUNT
-				: route == 6U ? (aRxBuffer[5] >= 7U && aRxBuffer[5] <= TEMPORARY_ROUTE_MAX_COUNT && aRxBuffer[5] % 7U == 0U)
-				: singleSample ? ((aRxBuffer[22] == 5U || aRxBuffer[22] == 7U) &&
+				: route == 6U ? 0U /* retired seven-point acquisition */
+				: singleSample ? (aRxBuffer[22] == 5U &&
 				  aRxBuffer[5] >= aRxBuffer[22] && aRxBuffer[5] <= aRxBuffer[22] * 9U && aRxBuffer[5] % aRxBuffer[22] == 0U)
 				: (aRxBuffer[5] >= TEMPORARY_ROUTE_MIN_COUNT &&
 				   aRxBuffer[5] <= TEMPORARY_ROUTE_COUNT && aRxBuffer[5] % 5U == 0U);
@@ -2110,7 +2109,7 @@ static void runFastFlankStream(void)
 				{
 						uint8_t row = streamRows[local];
 						/* A short x7 hold never enters stressHoldWait's >=1 ms
-						 * cooperative service. One thermal step per 63-row frame
+						 * cooperative service. One thermal step per 45-row frame
 						 * can therefore stale the 17-step 1-Wire transaction.
 						 * Advance at most one bounded primitive before each x7
 						 * group, outside both DAC-to-ADC settling windows. Keep

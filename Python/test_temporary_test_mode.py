@@ -83,7 +83,7 @@ class TemporaryTests(unittest.TestCase):
         parsed = t.decode(wire, 123, route_crc, point_delays_us=[650] * 15,
                           point_count=15)
         self.assertEqual(len(parsed['records']), 15)
-        self.assertIn('peak_at_edge', t.quality(parsed))
+        self.assertNotIn('peak_at_edge', t.quality(parsed))
         self.assertEqual(len(list(t.extract_frames(bytearray(wire)))), 1)
 
     def test_t45_uses_dedicated_145_ma_ceiling_only(self):

@@ -84,7 +84,7 @@ class AutoPortTests(unittest.TestCase):
                 opened.append(self)
             def write(self, packet):
                 if self.port == 'COM12':
-                    self.data.extend(px.build_frame(0x01, b'\0' * 8))
+                    self.data.extend(px.build_rs485_frame(3, struct.pack('<6f', 1, 2, 3, 4, 5, 6)))
             def flush(self): pass
             @property
             def in_waiting(self): return len(self.data)

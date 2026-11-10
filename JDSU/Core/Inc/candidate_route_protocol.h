@@ -21,7 +21,7 @@
  */
 #define CANDIDATE_ROUTE_COUNT 27U
 #define TEMPORARY_ROUTE_COUNT 45U
-#define TEMPORARY_ROUTE_MAX_COUNT 63U
+#define TEMPORARY_ROUTE_MAX_COUNT 45U
 #define TEMPORARY_ROUTE_V6_CRC_OFFSET 796U
 #define TEMPORARY_ROUTE_MIN_COUNT 5U
 #define CANDIDATE_ROUTE_V1_CRC_OFFSET 348U
@@ -86,7 +86,7 @@ static uint8_t CandidateRoute_ParseV6(const uint8_t *packet, CandidateRoute *out
     uint16_t first = CandidateRoute_U16(packet + 6U), spacing = CandidateRoute_U16(packet + 20U);
     uint16_t boundary = single ? 0U : CandidateRoute_U16(packet + 22U);
     if(packet[0] != 255U || packet[1] != 255U || packet[2] != 3U || packet[3] != 10U ||
-       (group != 5U && group != 7U) || count < group || count > group * 9U || count % group ||
+       group != 5U || count < group || count > group * 9U || count % group ||
        (single && (packet[23] & 0xFEU)) ||
        packet[12] != 'T' || packet[13] != (single ? '1' : '7') || packet[14] != 'S' || packet[15] != '!' ||
        packet[18] != 16U || channel > 3U || (packet[19] & 12U) || (channel >= 2U && selector) ||
@@ -137,7 +137,9 @@ static uint8_t CandidateRoute_Parse(const uint8_t *packet, size_t length, Candid
     static const uint16_t temporaryLimits[5] = {63351U, 63351U, 32767U, 24575U, 24575U};
     if(!packet || !out || length != 808U) return 0U;
     uint8_t version = packet[4];
-    if(version == 6U || version == 7U) return CandidateRoute_ParseV6(packet, out);
+    /* Retired seven-point v6 must fail before publishing or any DAC write. */
+    if(version == 6U) return 0U;
+    if(version == 7U) return CandidateRoute_ParseV6(packet, out);
     /* v3/v4: temporary selected rows, no hidden writes. Separate magic,
      * CRC and frame types keep the existing v1/v2 wire contract unchanged. */
     if(version == 3U || version == 4U || version == 5U) {

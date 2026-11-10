@@ -21,7 +21,6 @@ from temporary_test_mode import (
     _feedback_pair,
     auto_select_dense_plan,
     assess_five_point_shape,
-    assess_peak_shape,
     points_per_peak_for_rows,
     build_manual_dense_plan,
     build_selected_plan,
@@ -441,8 +440,8 @@ class SwitchTimingWorker(TemporaryWorker):
                           reverse_wrap_tested=False)
         old_timeout = self.device.timeout
         try:
-            if len(route) not in (set(range(5, 46, 5)) | set(range(7, 64, 7))):
-                raise ValueError('开关测试需要有效的5点或7点每峰正向路线')
+            if len(route) not in set(range(5, 46, 5)):
+                raise ValueError('开关测试需要有效的每峰5点正向路线')
             command(route, 32, 1)  # Validate all DAC rows before optical commands.
             # Create and test the output location before any optical commands.
             # A missing/unwritable folder must fail before the first transition.
@@ -568,6 +567,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
     def __init__(self, controller):
         super().__init__()
         self.controller = controller
+        self.frame_listeners = []  # Complete measured frames; no truncation/padding.
         self.beta = beta_enabled()
         self.developer_mode = False
         self._developer_previous_frame = None
@@ -627,7 +627,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.selected_selection_point = None
         self._reference_line_prior_ready = False
         self._updating_selection_markers = False
-        self.fit_failure_streaks = [0] * 9
+
         self.selection_baseline_fraction = None
         self.selection_soft_baseline = False
         # A freshly selected dense route can enter a different laser branch
@@ -830,7 +830,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.show_peak_fits.setChecked(True)
         self.show_peak_fits.setToolTip(
             'Makima 样条，五点估计。使用原始CH1 ADC和旧标定波长坐标；所有有限五点排布都会尝试拟合。'
-            '不满足先升后降、R²偏低或中心/峰宽约束不足时仍显示结果，并用⚠标记。'
+            '有限数据均显示计算结果，不进行峰质量判定。'
             '不修改采样点、不补偿原始幅值；显示位数不代表精度。'
         )
         self.clear_reference_button = QtWidgets.QPushButton('清除参考线')
@@ -1053,9 +1053,9 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.peak_fit_status.setObjectName('acquisitionStatus')
         self.peak_fit_status.setWordWrap(True)
         layout.addWidget(self.peak_fit_status)
-        self.peak_fit_table = QtWidgets.QTableWidget(3, 9)
+        self.peak_fit_table = QtWidgets.QTableWidget(2, 9)
         self.peak_fit_table.setHorizontalHeaderLabels([f'峰{i+1}' for i in range(9)])
-        self.peak_fit_table.setVerticalHeaderLabels(['中心 nm（估计）', 'R²（形状诊断）', '状态'])
+        self.peak_fit_table.setVerticalHeaderLabels(['峰位置 nm（Makima曲线最大dBm）', '计算状态'])
         self.peak_fit_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.peak_fit_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.peak_fit_table.setMaximumHeight(150)
@@ -1135,8 +1135,9 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setMaximumHeight(210)
         self.data_tabs = QtWidgets.QTabWidget()
-        self.data_tabs.addTab(self.peak_fit_table, '9峰波长与拟合质量')
+        self.data_tabs.addTab(self.peak_fit_table, '9峰波长')
         self.data_tabs.addTab(self.table, '45点原始ADC')
+        self._init_peak_trend_tab()
         # Keep all three result rows visible, not just the tab/header strip.
         self.data_tabs.setMinimumHeight(160)
         self.data_tabs.setMaximumHeight(190)
@@ -1316,7 +1317,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         )
         self.show_peak_fits.setToolTip(
             f'使用原始{name} ADC和旧标定波长坐标；{method_note}'
-            '所有有限五点排布都会尝试拟合，有质量疑问时用⚠标记。'
+            '所有有限五点排布都会尝试拟合。'
             '不修改采样点、不补偿原始幅值；显示位数不代表精度。'
         )
         if self.plan is not None:
@@ -1332,7 +1333,8 @@ class TemporaryTestWindow(QtWidgets.QWidget):
 
         makima = self.peak_fit_method.currentData() == 'makima'
         self.peak_fit_table.setVerticalHeaderLabels([
-            '中心 nm（估计）', 'R²（形状诊断）' if makima else 'R²', '状态'
+            '峰位置 nm（Makima曲线最大dBm）' if makima else '中心 nm（拟合估计）',
+            '计算状态'
         ])
         self.clear_peak_fits(
             'Makima实验性拟合：等待下一帧' if makima else '高斯拟合：等待下一帧'
@@ -1526,6 +1528,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
             return False
 
     def _reset_machine_state(self):
+        self.clear_peak_trend()
         self._restoring_session = True
         try:
             self.plan = None
@@ -1595,7 +1598,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         if self.use_point_waits.isChecked() and self.point_waits is not None:
             if len(self.point_waits) == count:
                 return list(self.point_waits)
-        per_peak = self.points_per_peak() or 7
+        per_peak = self.points_per_peak() or 5
         first = options.get('first_delay_us', self.first_delay.value())
         boundary = (first + options.get('boundary_extra_us', 0)
                     if options else self.boundary_delay.value())
@@ -1630,7 +1633,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         layout.addWidget(note)
         reference = QtWidgets.QLabel(
             '850 µs参考：45点等待38.25 ms＋DAC总线20.25 ms＝58.50 ms；'
-            '63点等待53.55 ms＋DAC总线28.35 ms＝81.90 ms。'
+
             '这只是下限，不是实测帧周期或可保证帧率。')
         reference.setWordWrap(True)
         layout.addWidget(reference)
@@ -1669,10 +1672,10 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                     rows.append((label, f'{measured[key]:.3f} ms'))
             else:
                 actual_count = self.point_count()
-                count = actual_count or 63
+                count = actual_count or 45
                 budget = nominal_budget(self._developer_waits(count))
                 heading.setText((f'{count}点理论预算；' if actual_count else
-                                 '当前没有有效点表，以下为63点参考预算；')
+                                 '当前没有有效点表，以下为45点参考预算；')
                                 + '暂无有效相邻板端帧。'
                                 '需要开始正常采集后才能显示实测拆分，主机绘图时间不冒充板端时间。')
                 rows = [('当前设定等待', f"{budget['wait_ms']:.3f} ms"),
@@ -1917,7 +1920,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
             raise ValueError('需要先完成一条步长不大于0.10 nm的有效密集谱线')
         point_count = len(capture_plan.get('rows', [])) if capture_plan else 0
         peak_count = point_count // points_per_peak_for_rows(capture_plan['rows'])
-        if capture_plan is not None and point_count not in (set(range(5, 46, 5)) | set(range(7, 64, 7))):
+        if capture_plan is not None and point_count not in set(range(5, 46, 5)):
             raise ValueError('当前15/45点路线无效')
         references = self.reference_values
         has_reference = bool(
@@ -2039,7 +2042,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
             temporary.replace(record_path)
             is_default_nine_peak = (
                 int(payload.get('peak_count', 0)) == 9
-                and int(payload.get('point_count', 0)) in (45, 63)
+                and int(payload.get('point_count', 0)) == 45
                 and bool(payload.get('ready'))
             )
             if is_default_nine_peak:
@@ -2105,7 +2108,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                     ))
                     if (candidate_payload.get('schema')
                             == 'temporary_test_finger_capture_v1'
-                            and candidate_count in (45, 63) and candidate_peaks == 9
+                            and candidate_count == 45 and candidate_peaks == 9
                             and bool(candidate_payload.get('ready'))):
                         qualified.append((
                             float(candidate_payload.get('saved_s', 0.0)),
@@ -2134,7 +2137,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                     ('fullband_2001', f"{payload.get('peak_count', 'unknown')}_peak_route"),
                 )
             point_count = len(plan['rows']) if plan is not None else 0
-            if auto and (point_count not in (45, 63) or not payload.get('ready')):
+            if auto and (point_count != 45 or not payload.get('ready')):
                 return False
             if payload.get('point_count') not in (None, point_count):
                 raise ValueError('手指记录的点数与点表不一致')
@@ -2346,7 +2349,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.peak_fit_table.setHorizontalHeaderLabels(
             [f'峰{i + 1}' for i in range(peak_count)]
         )
-        self.data_tabs.setTabText(0, f'{peak_count}峰波长与拟合质量')
+        self.data_tabs.setTabText(0, f'{peak_count}峰波长')
         self.data_tabs.setTabText(1, f'{point_count}点数据')
         selected_view = min(self.peak_view.currentIndex(), peak_count)
         self.peak_view.blockSignals(True)
@@ -2453,7 +2456,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
             peak_count = point_count // points_per_peak_for_rows(plan['rows'])
             # Three-peak sessions remain named records for explicit loading;
             # application startup always returns to the nine-peak route.
-            if point_count not in (45, 63) or peak_count != 9:
+            if point_count != 45 or peak_count != 9:
                 return False
             plan = stamp_machine_metadata(
                 plan, ('fullband_2001', f'{peak_count}_peak_route')
@@ -2480,25 +2483,11 @@ class TemporaryTestWindow(QtWidgets.QWidget):
             manual_reference_reuse = bool(
                 plan.get('manual_adjustment_reference_reused')
             )
-            reference_gate_bypassed = bool(
-                plan.get('reference_shape_gate_bypassed')
-            )
             raw_reference = bool(plan.get('reference_acquisition_method') == 'equal_interval_single'
                                  and plan.get('reference_stability_evaluated') is False)
-            checks = []
-            if restored_ready and not raw_reference:
-                for group in range(peak_count):
-                    selected = plan['rows'][group * points_per_peak_for_rows(plan['rows']):group * points_per_peak_for_rows(plan['rows']) + points_per_peak_for_rows(plan['rows'])]
-                    check = assess_peak_shape(
-                        [row['measured_nm'] for row in selected],
-                        references[group * points_per_peak_for_rows(plan['rows']):group * points_per_peak_for_rows(plan['rows']) + points_per_peak_for_rows(plan['rows'])],
-                    )
-                    check['group'] = group + 1
-                    checks.append(check)
-                restored_ready = bool(
-                    manual_reference_reuse or reference_gate_bypassed
-                    or all(check['passed'] for check in checks)
-                )
+            # Legacy quality verdicts are optional historical metadata, not gates.
+            plan.pop('live_reference_fit_checks', None)
+            plan.pop('reference_shape_gate_bypassed', None)
 
             self._restoring_session = True
             self.channel_combo.setCurrentIndex(self.channel_combo.findData(channel))
@@ -2592,7 +2581,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                 self.redraw_values()
                 self.fit_values()
             if restored_ready:
-                self.plan['live_reference_fit_checks'] = checks
+
                 self.plan_ready = True
                 self.start_button.setEnabled(True)
                 if raw_reference:
@@ -2605,11 +2594,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                         f'已恢复键盘调整后的{point_count}点，可直接开始手指应力测试；参考虚线仍是调整前数据。'
                         '只有主动点击“采集并绘制参考线”才会重新采集。'
                     )
-                elif reference_gate_bypassed:
-                    self.status.setText(
-                        f'已恢复{point_count}点和参考线；参考采集的稳定/峰形检查未通过，但按设置仍可直接开始手指应力测试。'
-                        '只有主动点击“采集并绘制参考线”才会重新采集。'
-                    )
+
                 else:
                     self.status.setText(
                         f'已自动恢复上次{peak_count}/{peak_count}通过的{point_count}点、密集光谱和参考线；可直接开始手指应力测试。'
@@ -2666,19 +2651,14 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                 ))
                 values.append(float(recorded['ch1_adc_code']))
                 previous = index
+            from temporary_peak_fit_makima import fit_peak_points
             for group in range(9):
                 group_rows = selected[group * self.points_per_peak():group * self.points_per_peak() + self.points_per_peak()]
-                check = assess_peak_shape(
-                    [row['measured_nm'] for row in group_rows],
-                    values[group * self.points_per_peak():group * self.points_per_peak() + self.points_per_peak()],
-                )
-                check['group'] = group + 1
-                checks.append(check)
-                fitted_center = check.get('fitted_center_nm')
-                peaks.append(float(fitted_center) if fitted_center is not None
-                             and np.isfinite(fitted_center)
-                             else float(group_rows[2]['measured_nm']))
-            all_passed = all(check['passed'] for check in checks)
+                fit = fit_peak_points([row['measured_nm'] for row in group_rows],
+                                     values[group * self.points_per_peak():group * self.points_per_peak() + self.points_per_peak()])
+                if not fit.get('fit_available'):
+                    raise ValueError('参考峰波长数据无效')
+                peaks.append(float(fit['center_nm']))
             plan = dict(
                 schema='temporary_test_45_plan_v1', rows=selected, peaks_nm=peaks,
                 reference_kind='restored_selected_reference',
@@ -2686,8 +2666,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                 optical_accuracy_verified=False, discarded_weak_peaks=0,
                 spacing_basis='operator_selected_calibrated_table', hidden_points=0,
                 baseline_fraction=None, soft_baseline=True, endpoint_checks=[],
-                selection_fit_checks=checks, live_reference_fit_checks=checks,
-                selection_validation_required=not all_passed, manual_selection=True,
+                selection_validation_required=False, manual_selection=True,
             )
             dense_candidates = sorted(
                 (path for path in self.last_session_path.parent.glob('reference_*.json')
@@ -2720,29 +2699,19 @@ class TemporaryTestWindow(QtWidgets.QWidget):
             self.render_plan(ready=False)
             self.reference_values = values
             self.reference_wavelengths = [float(row['measured_nm']) for row in selected]
-            self.plan_ready = all_passed
-            self.start_button.setEnabled(all_passed)
+            self.plan_ready = True
+            self.start_button.setEnabled(True)
             for index, value in enumerate(values):
                 self.table.setItem(index, 5, QtWidgets.QTableWidgetItem(f'{value:g}'))
             self.show_reference.setChecked(True)
             self.redraw_values()
             self.fit_values()
-            if all_passed:
-                self.status.setText(
-                    '已从上次9/9通过的参考线自动恢复45点；可直接开始手指应力测试。'
-                    '该记录已转换为新的自动保存会话。'
-                )
-            else:
-                failed = '、'.join(
-                    f"峰{check['group']}({check['reason']})"
-                    for check in checks if not check['passed']
-                )
-                self.status.setText(
-                    '已自动恢复上次45点和未通过的参考虚线：' + failed
-                    + '；点位不会丢失，请单击选中并用左右方向键调整。'
-                )
+            self.status.setText(
+                '已从上次完整参考线自动恢复45点；可直接开始手指应力测试。'
+                '该记录已转换为新的自动保存会话。'
+            )
             self._restoring_session = False
-            self._save_last_route_session(ready=all_passed)
+            self._save_last_route_session(ready=True)
             return True
         except Exception as exc:
             self.status.setText(f'旧版参考线自动恢复失败，已保留默认路线：{exc}')
@@ -3022,7 +2991,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.dense_failed_points = list(self.plan.get('dense_failed_points', []))
         self.dense_channel = int(self.plan.get('signal_channel', self.selected_channel()))
         self.plan_ready = bool(ready)
-        self.fit_failure_streaks = [0] * peak_count
+
         self.save_finger_button.setEnabled(True)
         self.load_finger_button.setEnabled(True)
         self.clear_peak_fits('等待当前点表的实时帧')
@@ -3160,7 +3129,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         boundary_gap = max(value for band in plan['selection_band_checks']
                            for value in band['boundary_height_gap_db'])
         self.status.setText(
-            '自动选点完成：9峰×7点，dBm视觉上半段按高度均匀分层，'
+            '自动选点完成：9峰×5点，dBm视觉上半段按高度均匀分层，'
             f'左右按高度配对（不要求波长等距），最大配对高度差{height_difference:.3f} dB；'
             f'最低点锚定半高线，最大高于半高线{boundary_gap:.3f} dB（真实采样量化）；可手动微调。'
             '请采集参考线后再开始测试；未通过点仍标出并继续采集。')
@@ -3937,7 +3906,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         if self.plan is None:
             return
         self.plan_ready = False
-        self.fit_failure_streaks = [0] * self.peak_count()
+
         self.start_button.setEnabled(False)
         self._save_last_route_session(ready=False)
 
@@ -4122,28 +4091,15 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                 return
             self.plan.pop('reference_acquisition_method', None)
             self.plan.pop('reference_stability_evaluated', None)
-            checks = []
-            for group in range(peak_count):
-                start = group * self.points_per_peak()
-                selected = self.plan['rows'][start:start + self.points_per_peak()]
-                check = assess_peak_shape(
-                    [row['measured_nm'] for row in selected],
-                    self.reference_values[start:start + self.points_per_peak()],
-                )
-                check['group'] = group + 1
-                checks.append(check)
-            self.plan['live_reference_fit_checks'] = checks
-            failed = [check for check in checks if not check['passed']]
-            if failed or quality_issues:
-                details = '、'.join(f"峰{check['group']}({check['reason']})" for check in failed)
-                issues = '、'.join(quality_issues[:6])
-                reasons = '、'.join(value for value in (details, issues) if value)
-                self.plan['reference_shape_gate_bypassed'] = True
+            self.plan.pop('live_reference_fit_checks', None)
+            self.plan.pop('reference_shape_gate_bypassed', None)
+            if quality_issues:
+                reasons = '、'.join(quality_issues[:6])
                 self.plan['reference_line_quality_issues'] = quality_issues
                 self.plan_ready = True
                 self.start_button.setEnabled(True)
                 self.status.setText(
-                    f'{point_count}点参考线已绘制，但稳定/峰形检查未通过：'
+                    f'{point_count}点参考线已绘制，采集读数标记：'
                     + (reasons or '未通过')
                     + '；按设置仍可直接开始手指应力测试。'
                     '只有主动点击“采集并绘制参考线”才会再次采集。'
@@ -4153,7 +4109,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
             self.plan.pop('reference_shape_gate_bypassed', None)
             self.plan.pop('reference_line_quality_issues', None)
             self.plan_ready = True
-            self.fit_failure_streaks = [0] * peak_count
+
             self.start_button.setEnabled(True)
             for i,value in enumerate(self.reference_values):
                 self.table.setItem(i,5,QtWidgets.QTableWidgetItem(f'{value:g}'))
@@ -4161,7 +4117,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
             self.redraw_values()
             self.fit_values()
             self.status.setText(
-                f'{point_count}点慢速参考线已绘制（虚线），{peak_count}峰形状余量通过并已停光；'
+                f'{point_count}点慢速参考线已绘制（虚线），已停光；'
                 '可开始实时扫描。'
             )
             self._save_last_route_session(ready=True)
@@ -4936,13 +4892,125 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self._redraw_t90_failures()
         self.redraw_peak_fits()
 
+    def _init_peak_trend_tab(self):
+        from peak_dbm_trend import PeakWavelengthHistory
+        self.peak_trend_history = PeakWavelengthHistory()
+        self.peak_trend_dirty = False
+        self.peak_trend_stopped = False
+        self.peak_trend_tab = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(self.peak_trend_tab)
+        box.setContentsMargins(4, 2, 4, 2)
+        box.setSpacing(2)
+        row = QtWidgets.QHBoxLayout()
+        self.peak_trend_values = QtWidgets.QLabel('峰位变化 Δλ (pm)：等待采集')
+        self.peak_trend_clear = QtWidgets.QPushButton('清空曲线')
+        self.peak_trend_clear.clicked.connect(self.clear_peak_trend)
+        row.addWidget(self.peak_trend_values, 1)
+        row.addWidget(self.peak_trend_clear)
+        box.addLayout(row)
+        self.peak_trend_plot = pg.PlotWidget()
+        self.peak_trend_plot.setLabel('left', '峰位变化 Δλ', units='pm')
+        self.peak_trend_plot.setLabel('bottom', '采集相对时间', units='s')
+        for name in ('left', 'bottom'):
+            axis = self.peak_trend_plot.getAxis(name)
+            axis.enableAutoSIPrefix(False)
+            axis.setStyle(tickFont=QtGui.QFont('Microsoft YaHei UI', 9))
+        self.peak_trend_plot.showGrid(x=True, y=True, alpha=.15)
+        self.peak_trend_plot.setXRange(0, 60, padding=0)
+        self.peak_trend_plot.setYRange(-10, 10, padding=0)
+        self.peak_trend_legend = self.peak_trend_plot.addLegend(offset=(5, 0), colCount=9)
+        self.peak_trend_curves = [self.peak_trend_plot.plot(
+            pen=pg.mkPen(pg.intColor(i, 9), width=2), name=f'P{i+1}',
+            connect='finite') for i in range(9)]
+        box.addWidget(self.peak_trend_plot, 1)
+        self.peak_trend_status = QtWidgets.QLabel('Makima峰位变化（相对稳定零点，pm）；工程估计，未经波长计精度验证。')
+        self.peak_trend_status.setToolTip('复用同帧峰顶center_nm；Δλ=(当前−稳定窗口均值)×1000 pm。预热16帧后，连续≥2秒且≥10帧、极差≤1 pm建立固定零点；请保持空载静止。清空或换路线后重新等待稳定；缺帧、无时间或无峰值以NaN断线，不补零。最近60秒，每峰最多2000点。')
+        box.addWidget(self.peak_trend_status)
+        self.data_tabs.addTab(self.peak_trend_tab, '峰值实时曲线')
+        self.data_tabs.currentChanged.connect(self._peak_trend_tab_changed)
+        self.peak_trend_timer = QtCore.QTimer(self)
+        self.peak_trend_timer.setInterval(100)
+        self.peak_trend_timer.timeout.connect(self._flush_peak_trend)
+        self.peak_trend_timer.start()
+
+    def _peak_trend_tab_changed(self, _index):
+        selected = self.data_tabs.currentWidget() is self.peak_trend_tab
+        self.data_tabs.setMinimumHeight(260 if selected else 160)
+        self.data_tabs.setMaximumHeight(400 if selected else 190)
+        self._flush_peak_trend()
+
+    def wavelength_transport_context(self):
+        """Read-only transport binding for capture wavelength baseline isolation."""
+        import sys
+        app = sys.modules.get('app_JDSU')
+        device = getattr(app, 'ser', None)
+        return (type(device).__name__, id(device), str(getattr(device,'port','')),
+                str(getattr(device,'host','')), str(getattr(device,'endpoint','')))
+
+    def clear_peak_trend(self, _checked=False):
+        self.peak_trend_history.clear()
+        self.wavelength_session_generation = getattr(self, "wavelength_session_generation", 0) + 1
+        self.peak_trend_stopped = False
+        self.peak_trend_status.setText('等待采集；Makima峰位变化（相对稳定零点，pm）；未经波长计精度验证。')
+        self.peak_trend_dirty = True
+        self.peak_trend_values.setText('峰位变化 Δλ (pm)：等待采集')
+        for curve in self.peak_trend_curves:
+            curve.clear()
+
+    def _buffer_peak_trend(self, frame):
+        identity = (get_runtime_machine_id(), self.latest_channel,
+                    self.latest_feedback_selector,
+                    tuple((r['index'], r['measured_nm']) for r in self.plan['rows']))
+        fits = self.peak_fits if self.peak_fit_method.currentData() == 'makima' else []
+        if self.peak_trend_history.append(frame.get('sequence'),
+                frame.get('cycle_start_us'), fits, identity):
+            self.peak_trend_dirty = True
+            self.peak_trend_stopped = False
+
+    def _flush_peak_trend(self):
+        if (not self.peak_trend_dirty
+                or self.data_tabs.currentWidget() is not self.peak_trend_tab):
+            return
+        self.peak_trend_dirty = False
+        count = self.peak_count()
+        values = []
+        for i, (curve, samples) in enumerate(zip(self.peak_trend_curves, self.peak_trend_history.samples)):
+            active = i < count
+            curve.setVisible(active)
+            legend_sample, legend_label = self.peak_trend_legend.items[i]
+            legend_sample.setVisible(active)
+            legend_label.setVisible(active)
+            if active and samples:
+                data = np.asarray(samples, dtype=float)
+                curve.setData(data[:, 0], data[:, 1], connect='finite')
+                value = data[-1, 1]
+                values.append(f'P{i+1} {value:.2f}' if np.isfinite(value) else f'P{i+1} —')
+            else:
+                curve.clear()
+                if active:
+                    values.append(f'P{i+1} —')
+        self.peak_trend_values.setText('Δλ (pm)：' + '  |  '.join(values))
+        history = self.peak_trend_history
+        if history.last_clock_us is not None:
+            t = (history.last_clock_us - history.origin_us) / 1e6
+            self.peak_trend_plot.setXRange(max(0., t - history.window_s),
+                                          max(history.window_s, t), padding=0)
+        self.peak_trend_plot.enableAutoRange(axis='y', enable=True)
+        prefix = ('已停采，保留曲线；' if self.peak_trend_stopped else
+                  '等待采集；' if history.last_clock_us is None else '实时 · 最近60 s；')
+        ready = sum(v is not None for v in history.baselines_nm[:count])
+        baseline_note = (f'等待稳定零点 {ready}/{count}；请保持空载静止；'
+                         if ready < count else '稳定零点已固定；')
+        self.peak_trend_status.setText(prefix + baseline_note + 'Makima峰位变化（pm）；未经波长计精度验证。')
+
     def clear_peak_fits(self, reason='等待实时帧'):
         self.peak_fits = []
+        self.clear_peak_trend()
         for curve, label in zip(self.fitted_curves, self.fit_labels):
             curve.clear()
             label.hide()
         for i in range(self.peak_count()):
-            for row, text in enumerate(('—', '—', reason)):
+            for row, text in enumerate(('—', reason)):
                 self.peak_fit_table.setItem(row, i, QtWidgets.QTableWidgetItem(text))
         self.peak_fit_status.setText(reason+'；基于旧标定坐标的估计，不代表光学精度通过。')
 
@@ -4959,8 +5027,7 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                 curve.clear()
                 label.hide()
                 continue
-            warning = not result.get('valid', False)
-            color = QtGui.QColor('#f59e0b') if warning else pg.intColor(i, 9)
+            color = pg.intColor(i, 9)
             curve.setPen(pg.mkPen(color, width=2, style=QtCore.Qt.DotLine))
             label.setColor(color)
             curve.setData(
@@ -4969,11 +5036,16 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                     result['curve_adc'], selector=self.latest_feedback_selector
                 ),
             )
-            marker = '⚠' if warning else ''
-            label.setText(f"P{i+1}{marker}\n≈{result['center_nm']:.4f}")
-            apex_display = float(self._plot_display_values([
-                result['baseline_adc'] + result['amplitude_adc']
-            ], selector=self.latest_feedback_selector)[0])
+
+            curve_peak = result.get('peak_selection_method') == 'makima_curve_global_max_dbm'
+            label.setText(f"P{i+1}\n{'Makima曲线最大dBm·拟合峰顶' if curve_peak else '拟合估计'}\n{result['center_nm']:.4f}")
+            peak_adc = (result['peak_adc'] if curve_peak else
+                        result['baseline_adc'] + result['amplitude_adc'])
+            apex_display = (float(result['peak_dbm'])
+                            if curve_peak and self.display_mode == 'dbm' else
+                            float(self._plot_display_values([
+                                peak_adc
+                            ], selector=result.get('feedback_selector', self.latest_feedback_selector))[0]))
             label.setPos(result['center_nm'], apex_display)
             label.show()
 
@@ -5070,6 +5142,12 @@ class TemporaryTestWindow(QtWidgets.QWidget):
                 self.update_frame(frame)
 
     def update_frame(self, frame):
+        records = frame.get('records', ())
+        if (self.plan is None or len(records) != len(self.plan['rows'])
+                or len(records) not in range(5, 46, 5)
+                or points_per_peak_for_rows(self.plan['rows']) != 5):
+            self.status.setText('丢弃不匹配的采集帧；每峰必须五点，不截断或补点')
+            return
         self._observe_developer_frame(frame)
         firmware_version = frame.get('firmware')
         if isinstance(firmware_version, int) and firmware_version > 0:
@@ -5081,7 +5159,9 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         self.latest_feedback_selector = int(frame.get(
             'feedback_selector', self.effective_feedback_selector(self.latest_channel)
         ))
-        makima = self.peak_fit_method.currentData() == 'makima' or self.points_per_peak() == 7
+        if self.latest_channel >= 2:
+            self.latest_feedback_selector = 0  # fixed 2 kΩ front end
+        makima = self.peak_fit_method.currentData() == 'makima'
         if makima:
             from temporary_peak_fit_makima import fit_temporary_frame
         else:
@@ -5089,46 +5169,28 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         if self.plan is None:
             self.clear_peak_fits('点表无效')
             return
-        self.peak_fits = fit_temporary_frame(self.plan['rows'], values, frame['sequence'] >= 16)
-        if frame['sequence'] >= 16:
-            for i, result in enumerate(self.peak_fits):
-                self.fit_failure_streaks[i] = 0 if result['valid'] else self.fit_failure_streaks[i] + 1
-            # Realtime fitting is a quality indication, not a destructive
-            # verification gate.  A few poor frames can be caused by motion or
-            # by stopping while a frame is in flight.  Revoking plan_ready here
-            # used to overwrite the last 9/9 slow-reference result and left the
-            # Start button disabled after "stop and switch off".  Keep the
-            # verified route reusable; the status below still identifies every
-            # peak whose live fit has failed repeatedly.
+        fit_kwargs = (dict(feedback_selector=self.latest_feedback_selector,
+                           adc_channel=self.latest_channel) if makima else {})
+        self.peak_fits = fit_temporary_frame(self.plan['rows'], values,
+                                             frame['sequence'] >= 16, **fit_kwargs)
+        self.makima_frame_snapshot = (frame, self.peak_fits if makima else [])
+        self._buffer_peak_trend(frame)
         for i, result in enumerate(self.peak_fits):
-            available = result.get('center_nm') is not None
-            warning = available and not result.get('valid', False)
-            center_text = (
-                f"{result['center_nm']:.4f}" + (' ⚠' if warning else '')
-                if available else '—'
-            )
-            r_squared = result.get('r_squared')
-            r2_text = (
-                f'{float(r_squared):.3f}'
-                if r_squared is not None and np.isfinite(r_squared) else '—'
-            )
-            texts = (center_text, r2_text, result['reason'])
+            center = result.get('center_nm')
+            available = center is not None and np.isfinite(center)
+            texts = (f'{center:.4f}' if available else '—', result['reason'])
             for row, text in enumerate(texts):
                 item = QtWidgets.QTableWidgetItem(text)
                 item.setToolTip(result['reason'])
-                if warning:
-                    item.setBackground(QtGui.QColor('#fff3cd'))
-                    item.setForeground(QtGui.QColor('#9a6700'))
                 self.peak_fit_table.setItem(row, i, item)
         available_count = sum(
             result.get('center_nm') is not None for result in self.peak_fits
         )
-        valid_count = sum(result.get('valid', False) for result in self.peak_fits)
-        warning_count = available_count - valid_count
+
         self.peak_fit_status.setText(
             f"第{frame['sequence']+1}帧：{available_count}/{self.peak_count()}峰已给出拟合，"
-            f"质量通过{valid_count}峰、⚠可能有问题{warning_count}峰；"
-            + ('点线为Makima实验性拟合；中心可能偏移，未经波长计精度验证。'
+
+            + ('峰位置取Makima实验性曲线全局最大dBm，可为插值点；401均匀点+实测点网格近似，同高取最左；未经波长计精度验证。'
              if makima else '点线为高斯拟合；波长精度未验证。')
             + '圆点/实线仍是原始值。'
         )
@@ -5136,8 +5198,11 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         if self.fit_pending and frame['sequence'] >= 16:
             self.fit_values()
         self._refresh_table_display_values()
-        if frame['sequence'] >= 16:
-            self.frame_times.append(frame['cycle_start_us'])
+        clock_us = frame.get('cycle_start_us')
+        if (frame['sequence'] >= 16 and isinstance(clock_us, (int, float))
+                and np.isfinite(clock_us)
+                and (not self.frame_times or clock_us > self.frame_times[-1])):
+            self.frame_times.append(clock_us)
             del self.frame_times[:-64]
         rate = ''
         display_stats = frame.get('display_statistics', {})
@@ -5149,22 +5214,26 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         if display_stats:
             rate += f"；显示最新帧，原始帧全部记录（{display_stats['received_frames']}帧）"
         q = frame['quality']
-        issues = [label for key, label in (('clipped', 'ADC饱和'), ('unsettled', '双采样差异较大（可能是信号变化）'),
-                                         ('peak_at_edge', '峰在窗口边缘，扫描点仍保持不变')) if q[key]]
-        drifted = [str(i + 1) for i, streak in enumerate(self.fit_failure_streaks) if streak >= 3]
-        if drifted:
-            issues.append(
-                '峰' + '/'.join(drifted)
-                + ('最近显示帧出现拟合质量警告：' if display_stats else '连续出现拟合质量警告：')
-                + '结果已保留，请结合表格中的⚠原因判断'
-            )
+        issues = [label for key, label in (('clipped', 'ADC饱和'),
+                  ('unsettled', '双采样差异较大（可能是信号变化）')) if q.get(key)]
+
         if not q['warmed_up']:
             issues.append('预热中')
         sampling_note = ('单次ADC采集中；未验证波长稳定' if frame.get('single_sample')
                          else '原始数据采集中，双采样不能证明已稳定')
         self.status.setText(f"第{frame['sequence']+1}帧{rate} · " + (' / '.join(issues) or sampling_note))
 
+        for listener in tuple(self.frame_listeners):
+            try:
+                listener(frame)
+            except Exception as exc:
+                self.status.setText(self.status.text() + f' · 帧订阅失败：{exc}')
+
     def stop(self):
+        self.peak_trend_stopped = True
+        self.peak_trend_dirty = True
+        self._flush_peak_trend()
+        self.peak_trend_status.setText('已停采，保留曲线；Makima峰位变化（相对稳定零点，pm）；未经波长计精度验证。')
         if self.worker is not None:
             self.worker.stop()
             self.stop_button.setEnabled(False)
@@ -5176,6 +5245,9 @@ class TemporaryTestWindow(QtWidgets.QWidget):
         # worker's completion/error/shutdown message instead of hiding it.
         completion_message = self.status.text()
         self._flush_temporary_display()
+        self.peak_trend_stopped = True
+        self.peak_trend_dirty = True
+        self._flush_peak_trend()
         self.status.setText(completion_message)
         auto_select_after_dense = self._auto_select_after_dense
         self._auto_select_after_dense = False

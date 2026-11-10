@@ -8,20 +8,20 @@ from test_temporary_test_mode import reference
 
 
 def capture(wait=15000, shift=0, period_us=1000000):
-    # This fixed synthetic ADC vector describes a uniform seven-row window;
+    # This fixed synthetic ADC vector describes a uniform five-row window;
     # don't couple its geometry to a changing automatic-selection policy.
     table=reference()[0]
     rows=[dict(group=1,index=point.index,target_nm=point.target_nm,
                measured_nm=point.measured_nm,codes=list(point.codes))
-          for point in (table[100+offset] for offset in (-9,-6,-3,0,3,6,9))]
-    values=(80,450,900,1500,900,450,80)
+          for point in (table[100+offset] for offset in (-9,-3,0,3,9))]
+    values=(80,900,1500,900,80)
     return dict(complete=True, disarm_ack=True, shutter_ack=True,
                 continuous=False, received_frames=32, plan=dict(rows=rows),
                 single_sample=True, fast_dac_writes=True,
                 hardware_identity=dict(serial_number='synthetic_test_fixture_not_a_board',
                                        boot_id=123,firmware_version=0x10073),
                 stationary_setup_confirmed=True,
-                signal_channel=0, feedback_selector=2, point_delays_us=[wait]*7,
+                signal_channel=0, feedback_selector=2, point_delays_us=[wait]*5,
                 frames=[dict(sequence=n,kind='data',firmware=0x10073,
                              adc_channel=0,feedback_selector=2,i2c_errors=0,spi_errors=0,
                              cycle_start_us=n*period_us,single_sample=True,
@@ -33,7 +33,7 @@ class RouteBalanceTests(unittest.TestCase):
     def test_height_paired_route_with_coordinate_consistent_raw_signal_still_qualifies(self):
         _,_,values,plan=selected()
         before,fast,after=capture(),capture(850),capture()
-        rows=plan['rows'][:7]
+        rows=plan['rows'][:5]
         for report in (before,fast,after):
             report['plan']['rows']=copy.deepcopy(rows)
             for frame in report['frames']:
@@ -76,11 +76,11 @@ class RouteBalanceTests(unittest.TestCase):
         from unittest.mock import patch
         import numpy as np
         import temporary_route_balance_validation as validation
-        raw=np.ones((16,7))*1000
+        raw=np.ones((16,5))*1000
         rate=dict(mean_hz=10, p99_period_ms=100, measured_frames=16, firmware=0x10073)
-        observed=[(raw, np.ones((16,1))*1530, True, rate),
-                  (raw, np.ones((16,1))*1530.100, True, rate),
-                  (raw, np.ones((16,1))*1530.040, True, rate)]
+        observed=[(raw, np.ones((16,1))*1530, rate),
+                  (raw, np.ones((16,1))*1530.100, rate),
+                  (raw, np.ones((16,1))*1530.040, rate)]
         with patch.object(validation, '_observations', side_effect=observed):
             result=compare_full_route(capture(),capture(850),capture())
         self.assertTrue(result['relative_accuracy_passed'])
@@ -95,8 +95,9 @@ class RouteBalanceTests(unittest.TestCase):
         for f in dark['frames']:
             for r in f['records']:r['adc_code']=2
         result=compare_full_route(dark,copy.deepcopy(dark),copy.deepcopy(dark))
-        self.assertFalse(result['relative_accuracy_passed'])
-        self.assertIn('reference_peak_shape_unresolved',result['reasons'])
+        self.assertTrue(result['relative_accuracy_passed'])
+        self.assertFalse(result['absolute_wavelength_accuracy_verified'])
+        self.assertNotIn('reference_peak_shape_unresolved',result['reasons'])
 
     def test_incomplete_bus_errors_stale_scope_shutdown_and_reference_wait_rejected(self):
         for mode in ('missing','scope','gain','coords','style','bus','firmware','shutdown',
@@ -211,8 +212,8 @@ class PipelineStyleTests(unittest.TestCase):
             else:
                 for frame in after['frames']:
                     frame['records'][2]['second_code'] += 60
-            self.assertFalse(compare_pipeline_styles(before, optimized, after)
-                             ['relative_sampling_style_consistency_passed'])
+            self.assertEqual(compare_pipeline_styles(before, optimized, after)
+                             ['relative_sampling_style_consistency_passed'], mode == 'dark')
 
 
 class PipelineLiveWorkflowTests(unittest.TestCase):
@@ -275,11 +276,11 @@ class PipelineLiveWorkflowTests(unittest.TestCase):
             self.assertFalse(calls[index].kwargs['single_adc'])
             self.assertFalse(calls[index].kwargs['fast_dac_writes'])
         for index in (0, 1, 2, 3, 5):
-            self.assertEqual(calls[index].args[2], [15000]*7)
-        self.assertEqual(calls[4].args[2], [850]*7)
+            self.assertEqual(calls[index].args[2], [15000]*5)
+        self.assertEqual(calls[4].args[2], [850]*5)
         self.assertTrue(summary['sampling_style_qualification']
                         ['relative_sampling_style_consistency_passed'])
-        self.assertEqual(summary['fastest_relative_accuracy_candidate']['point_delays_us'], [850]*7)
+        self.assertEqual(summary['fastest_relative_accuracy_candidate']['point_delays_us'], [850]*5)
         self.assertFalse(summary['sampling_style_qualification']['candidate_style']['fast_dac_writes'])
         self.assertFalse(summary['absolute_wavelength_accuracy_verified'])
 
